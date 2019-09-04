@@ -1,0 +1,428 @@
+# Storj3Monitor script by Krey
+# this script gathers, aggregate displays and monitor all you node thresholds
+# if uptime or audit down by [threshold] script send email to you
+
+$v = "0.1"
+
+# Changes:
+# v0.0    - 20190828 Initial version, only displays data
+# v0.1    - 20190904 
+#           Add monitoring 
+#               -   lost node connection
+#               -   outdate storj version
+#               -   new satellite
+#               -   audit score
+#               -   uptime score
+#               -   Warrant canary
+#           Add mail senders
+#               -   for windows & linux internal powershell mail agent
+#               -   for linux via bash -c "cat | mail"
+
+#!!!!!!!!!!!!! USAGE
+#EDIT
+#   Firstly edit $config
+#RUN
+#   Display only
+#       pwsh ./Storj3Monitor.ps1
+#   Monitor and mail
+#       pwsh ./Storj3Monitor.ps1 monitor
+
+
+
+#!!!!!!!!!!!!! Fill this with you dashboard api addresses for each node. Default is one 127.0.0.1:14002 !!!!!!!!!!!!!
+$config = @{
+    Nodes = 
+        "127.0.0.1:14002"
+
+        #"192.168.155.1:4401",
+        #"192.168.157.2:14002",
+        #"192.168.156.4:4403",
+        #"192.168.156.4:4404"
+    
+    WaitSeconds = 300 #DEBUG 5
+    Threshold = 0.2
+
+    # MailAgent: one of [none, linux, powershell] with it own configs
+
+    Mail = @{
+        MailAgent = "none"
+    }
+
+    # Mail = @{
+    #     MailAgent = "linux"
+    #     Path = "/bin/bash"
+    #     To = "you@examle.org"
+    #     Subj = "Storj monitor by Krey"
+    # }
+
+    # Mail = @{
+    #     MailAgent = "powershell"
+    #     To = "you@examle.org"
+    #     From = "noreply@example.org"
+    #     Subj = "Storj monitor by Krey"
+    #     Smtp = "smtp.example.org"
+    #     Port = 587
+    #     AuthUser = "service"
+    #     AuthPass = "password"
+    # }
+}
+
+function Preamble{
+    Write-Host ""
+    Write-Host ("Storj3Monitor script by Krey ver {0}" -f $v)
+    Write-Host "mail-to: krey@irinium.ru"
+    Write-Host ""
+    Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
+    Write-Host ""
+}
+
+function GetJson
+{
+    param($uri)
+
+    $resp = Invoke-WebRequest -Uri $uri
+    if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
+    $json = ConvertFrom-Json $resp.Content
+    if (-not [System.String]::IsNullOrEmpty($json.Error)) { throw $json.Error }
+    else { $json = $json.data }
+    return $json
+}
+
+function GetNodes
+{
+    param ($config)
+    $result = [System.Collections.Generic.List[PSCustomObject]]@()
+    
+    $config.Nodes | ForEach-Object {
+        $address = $_
+        try {
+            $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address)
+            $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
+
+            $dash.satellites | ForEach-Object {
+                $satid = $_
+                try {
+                    $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
+                    $dash.Sat.Add($sat)
+                }
+                catch {
+                    Write-Host -ForegroundColor Red ("Node on address {0} fail sat {1}: {2}" -f $address, $satid, $_.Exception.Message )        
+                }
+            }
+            $result.Add($dash)
+        }
+        catch {
+            Write-Host -ForegroundColor Red ("Node on address {0} fail: {1}" -f $address, $_.Exception.Message )
+        }
+    }
+    return $result
+}
+
+function GetScore
+{
+    param($nodes)
+    #$result = [System.Collections.Generic.List[PSObject]]@()
+    $nodes | Sort-Object nodeID | ForEach-Object {
+        $node = $_
+        $node.Sat | Sort-Object id | ForEach-Object {
+            $sat = $_
+            New-Object PSCustomObject -Property @{
+                Key = ("{0}-{1}" -f $node.nodeID, $sat.id)
+                NodeId = $node.nodeID
+                SatelliteId = $sat.id
+                Audit = $sat.audit.score
+                Uptime = $sat.uptime.score
+                Ingress = $sat.bandwidthDaily.ingress.repair + $sat.bandwidthDaily.ingress.usage
+                Egress = $sat.bandwidthDaily.egress.repair + $sat.bandwidthDaily.egress.usage
+            }
+        }
+    }
+}
+function Compact
+{
+    param($id)
+    return $id.Substring(0,4) + "-" + $id.Substring($id.Length-2)
+}
+
+function Round
+{
+    param($value)
+    return [Math]::Round($value * 100, 2)
+}
+
+function HumanBytes {
+    param ([int64]$bytes)
+    $suff = "bytes", "KiB", "MiB", "GiB", "TiB", "PiB"
+    $level = 0
+    $rest = [double]$bytes
+    while ([Math]::Abs($rest/1024) -ge 1) {
+        $level++
+        $rest = $rest/1024
+    }
+    $mant = [Math]::Max(3 - [Math]::Floor($rest).ToString().Length,0)
+    return ("{0} {1}" -f [Math]::Round($rest,$mant), $suff[$level])
+}
+
+function Out-Buffer {
+    param ([System.Text.StringBuilder][ref]$sb, $msg)
+    $sb.AppendLine($msg) | Out-Null
+    Write-Host $msg
+}
+
+function CheckNodes{
+    param(
+        $config, 
+        [System.Text.StringBuilder][ref]$sb,
+        [ref]$oldNodesRef
+    )
+    $oldNodes = $oldNodesRef.Value
+    ;
+    $newNodes = GetNodes -config $config
+
+    #DEBUG drop some satellites and reset update
+    #$newNodes = $newNodes | Select-Object -First 2
+    #$newNodes[1].upToDate = $false
+
+    # Check absent nodes
+    $failNodes = ($oldNodes | Where-Object { ($newNodes | Select-Object -ExpandProperty nodeID) -notcontains $_.nodeID })
+    if ($failNodes.Count -gt 0) {
+        $failNodes | ForEach-Object {
+            Out-Buffer -sb ([ref]$sb) -msg ("Disconnected from node {0}" -f $_.nodeID)
+        }
+    }
+
+    ;
+    # Check versions
+    $oldVersion = ($newNodes | Where-Object {-not $_.upToDate})
+    if ($oldVersion.Count -gt 0) {
+        $oldVersion | ForEach-Object {
+            $testNode = $_
+            $oldVersionStatus = $oldNodes | Where-Object { $_.nodeID -eq $testNode.nodeID } | Select-Object -First 1 -ExpandProperty upToDate
+            if ($oldVersionStatus) {
+                Out-Buffer -sb ([ref]$sb) -msg ("Node {0} is old ({1}.{2}.{3})" -f $testNode.nodeID, $testNode.version.major, $testNode.version.minor, $testNode.version.patch)
+            }
+        }
+    }
+
+    # Check new satellites
+    $oldSat = $oldNodes.satellites | Select-Object -Unique
+
+    #DEBUG drop some satellites
+    #$oldSat = $oldSat | Sort-Object | Select-Object -First 2
+
+    $newSat = $newNodes.satellites | Select-Object -Unique | Where-Object {$oldSat -notcontains $_ }
+    if ($newSat.Count -gt 0) {
+        $newSat | ForEach-Object {
+            Out-Buffer -sb ([ref]$sb) -msg ("New satellite {0}" -f $_)
+        }
+    }
+
+    $oldNodesRef.Value = $newNodes
+}
+
+function CheckScore{
+    param(
+        $config, 
+        [System.Text.StringBuilder][ref]$sb,
+        $nodes,
+        $oldScore
+    )
+    $newScore = GetScore -nodes $nodes
+
+    #DEBUG drop scores
+    #$newScore[0].Audit = 0.2
+    #$newScore[3].Uptime = 0.6
+
+    $newScore | ForEach-Object {
+        $new = $_
+        $old = $oldScore | Where-Object { $_.Key -eq $new.Key }
+        if ($null -ne $old){
+            $idx = $oldScore.IndexOf($old)
+            if ($old.Audit -ge ($new.Audit + $config.Threshold)) {
+                Out-Buffer -sb ([ref]$sb) -msg ("Node {0} down audit from {1} to {2} on {3}" -f $new.nodeID, $old.Audit, $new.Audit, $new.SatelliteId)
+                $oldScore[$idx].Audit = $new.Audit
+            }
+            elseif ($new.Audit -gt $old.Audit) { $oldScore[$idx].Audit = $new.Audit }
+
+            if ($old.Uptime -ge ($new.Uptime + $config.Threshold)) {
+                Out-Buffer -sb ([ref]$sb) -msg ("Node {0} down uptime from {1} to {2} on {3}" -f $new.nodeID, $old.Uptime, $new.Uptime, $new.SatelliteId)
+                $oldScore[$idx].Uptime = $new.Uptime
+            }
+            elseif ($new.Uptime -gt $old.Uptime) { $oldScore[$idx].Uptime = $new.Uptime }
+        }
+    }
+}
+
+
+#SendMail -config $config -sb ([ref]$sb)
+function SendMail{
+    param(
+        $config, 
+        [System.Text.StringBuilder][ref]$sb
+    )
+
+    if ($null -eq $config.Mail -or $config.Mail.MailAgent -eq "none") { 
+        $sb.Clear() | Out-Null
+    }
+    elseif ($config.Mail.MailAgent -eq "powershell") { SendMailPowershell -config $config -sb ([ref]$sb) }
+    elseif ($config.Mail.MailAgent -eq "linux") { SendMailLinux -config $config -sb ([ref]$sb) }
+    else {
+        Write-Host -ForegroundColor Red "Mail not properly configuried"
+    }
+}
+
+function ExecCommand {
+    param ($path, $params, [switch]$out)
+
+    $content = $null
+    if ($out) { 
+    $temp = [System.IO.Path]::GetTempFileName()
+    #Write-Host ("Exec {0} {1}" -f $path, $params)
+    #Write-Host ("Output redirected to {0}" -f $temp)
+    $proc = Start-Process -FilePath $path -ArgumentList $params -RedirectStandardOutput $temp -Wait -PassThru
+    #Write-Host done
+	$content = Get-Content -Path $temp
+	[System.IO.File]::Delete($temp)
+	if ($proc.ExitCode -ne 0) { throw $content }
+	else { return $content }
+    }
+    else { 
+	$proc = Start-Process -FilePath $path -ArgumentList $params -Wait -PassThru
+	if ($proc.ExitCode -ne 0) { return $false }
+	else { return $true }
+    }
+}
+
+function SendMailLinux{
+    param(
+        $config, 
+        [System.Text.StringBuilder][ref]$sb
+    )
+
+    ;
+    $body = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($body, $sb.ToString())
+
+        $catParam = "'{0}'" -f $body
+        $mailParam = "-s '{0}' {1}" -f $config.Mail.Subj, $config.Mail.To
+        $bashParam = ('-c "cat {0} | mail {1}"' -f $catParam, $mailParam)
+        $output = ExecCommand -path $config.Mail.Path -params $bashParam -out
+
+        Write-Host ("Mail sent to {0} via linux agent" -f $config.Mail.To)
+        if ($output.Length -gt 0) { Write-Host $output }
+        $sb.Clear() | Out-Null
+        Write-Host "Buffer cleared"
+    }
+    catch {
+        Write-Host -ForegroundColor Red ($_.Exception.Message)        
+    }
+    finally {
+        try {
+            #if ([System.IO.File]::Exists($body)) { [System.IO.File]::Delete($body) }    
+        }
+        catch { }
+    }
+
+}
+
+function SendMailPowershell{
+    param(
+        $config, 
+        [System.Text.StringBuilder][ref]$sb
+    )
+    try {
+        $pd = $config.Mail.AuthPass | ConvertTo-SecureString -asPlainText -Force
+        $credential = New-Object System.Management.Automation.PSCredential($config.Mail.AuthUser, $pd)
+
+        Send-MailMessage  `
+            -To ($config.Mail.To) `
+            -From ($config.Mail.From) `
+            -Subject ($config.Mail.Subj) `
+            -Body ($sb.ToString()) `
+            -UseSsl `
+            -SmtpServer ($config.Mail.Smtp) `
+            -Port ($config.Mail.Port) `
+            -Credential $credential
+        
+        Write-Host ("Mail sent to {0} via powershell agent" -f $config.Mail.To)
+        $sb.Clear() | Out-Null
+        Write-Host "Buffer cleared"
+    }
+    catch {
+        Write-Host -ForegroundColor Red ($_.Exception.Message)
+    }
+
+}
+
+function Monitor {
+    param (
+        $config, 
+        [System.Text.StringBuilder][ref]$sb, 
+        $oldNodes,
+        $oldScore
+    )
+
+    while ($true) {
+        Start-Sleep -Seconds $config.WaitSeconds
+        CheckNodes -config $config -sb ([ref]$sb) -oldNodesRef ([ref]$oldNodes)
+        CheckScore -config $config -sb ([ref]$sb) -nodes $oldNodes -oldScore $oldScore
+
+        ;
+        if ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -gt 9) {
+            $config.Canary = [System.DateTimeOffset]::Now
+            Out-Buffer -sb ([ref]$sb) -msg ("i'am alive {0}" -f $config.Canary)
+        }
+
+        if ($sb.Length -gt 0) { SendMail -config $config -sb ([ref]$sb) }
+    }
+    Write-Host "Stop monitoring"
+}
+
+Preamble
+
+$config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
+$config | Add-Member -NotePropertyName Canary -NotePropertyValue $config.StartTime
+
+#DEBUG check Canary
+#$config.Canary = [System.DateTimeOffset]::Now.Subtract([System.TimeSpan]::FromDays(1))
+
+$nodes = GetNodes -config $config
+$score = GetScore -nodes $nodes
+$tab = $score | Sort-Object SatelliteId, NodeId | Format-Table `
+    @{n='Satellite';e={Compact($_.SatelliteId)}}, `
+    @{n='Node';e={Compact($_.NodeId)}}, `
+    @{n='Ingress';e={HumanBytes($_.Ingress)}}, `
+    @{n='Egress';e={HumanBytes($_.Egress)}}, `
+    @{n='Audit';e={Round($_.Audit)}}, `
+    @{n='Uptime';e={Round($_.Uptime)}}
+
+if ($args.Contains("monitor")) {
+    [System.Text.StringBuilder]$sb = [System.Text.StringBuilder]::new()
+    $sb.AppendLine(("Start monitoring {0} entries at {1}, {2} seconds cycle" -f $score.Count, $config.StartTime, $config.WaitSeconds)) | Out-Null
+    $sb.Append(($tab | Out-String)) | Out-Null
+    $sb.ToString()
+
+    Monitor -config $config -sb ([ref]$sb) -oldNodes $nodes -oldScore $score
+}
+else {
+    $tab
+}
+
+#END OF SCRIPT Storj3Monitor.ps1 mail to krey@irinium.ru
+
+#/etc/systemd/system/Storj3Monitor.service
+#[Unit]
+#Description=Storj v3 monitor by Krey
+##Requires=network.target
+#After=network-online.target
+#Wants=network-online.target
+#
+#[Service]
+#Type=simple
+#ExecStart=/usr/bin/pwsh /etc/scripts/Storj3Monitor.ps1 monitor #edit path
+#ExecStop=/bin/kill --signal SIGINT ${MAINPID}
+#
+#[Install]
+#WantedBy=multi-user.target
+
