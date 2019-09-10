@@ -55,7 +55,7 @@ Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/Confi
 
 <ul>
   <li><b>Storj3Monitor-builtinMail.conf</b></li>
-  Send with powershell built-in mailer
+  Send with powershell built-in mailer. You password in script config file
   <li><b>Storj3Monitor-linuxMail.conf</b></li>
   Send with linux mail command
   <li><b>Send with google</b> (https://support.google.com/a/answer/176600)
