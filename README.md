@@ -19,19 +19,22 @@ Node 1...U down uptime from 1 to 0,6 on 12L9<br/>
 <h2>Install on Linux</h2>
 
 <h3>0. Check if powershell already installed</h3>
-  run 'pwsh' or 'powershell' command<br/>
+run 'pwsh' or 'powershell' command
 
 <h3>1. Install powershell.core</h3>
 https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-core-on-linux?view=powershell-6
+<br/>
 https://github.com/PowerShell/PowerShell
 
 <h3>2. Download script</h3>
+<code>
 mkdir /etc/scripts/storj<br/>
 cd /etc/scripts/storj<br/>
 curl -O https://raw.githubusercontent.com/Krey81/Storj/master/Storj3Monitor/Storj3Monitor.ps1<br/>
+</code>
 
 <h3>3. First run</h3>
-pwsh ./Storj3Monitor.ps1
+<code>pwsh ./Storj3Monitor.ps1</code>
 
 script run with default config
 you can ask default config with pwsh ./Storj3Monitor.ps1 example
@@ -68,11 +71,11 @@ Make your own config. Specify nodes and mailer configuration. <br/>
 So you create /etc/scripts/storj/Storj3Monitor.my.conf
 
 <h3>5. Try run with config</h3>
-pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf
+<code>pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf</code>
 check output. You must see all you nodes thresholds. 
 
 <h3>6. Check mailer</h3>
-pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf testmail
+<code>pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf testmail</code>
 check you inbox and spam folders.
 
 <h3>7. Setup service</h3>
@@ -95,8 +98,8 @@ WantedBy=multi-user.target
 </pre>
 
 <h3>8. Enable service </h3>
-systemctl enable Storj3Monitor.service
+<code>systemctl enable Storj3Monitor.service</code>
 
 <h3>9. Reboot and check</h3>
-systemctl status Storj3Monitor<br/>
+<code>systemctl status Storj3Monitor</code>
 will be <Active: active (running)>
