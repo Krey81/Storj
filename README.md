@@ -10,8 +10,8 @@ Storj3Monitor - ask one or more you nodes, combine output
 
 If something wrong with your nodes you can receive messages like this:
 
-Disconnected from node 1[censored]w
-Node 1[censored]U down audit from 1 to 0,2 on 118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW
-Node 1[censored]U down uptime from 1 to 0,6 on 12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs
+Disconnected from node 1...w
+Node 1[censored]U down audit from 1 to 0,2 on 118
+Node 1[censored]U down uptime from 1 to 0,6 on 12L9
 !WARNING! NEW WALLET 0x...
 
