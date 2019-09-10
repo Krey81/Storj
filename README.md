@@ -72,11 +72,11 @@ So you create /etc/scripts/storj/Storj3Monitor.my.conf
 
 <h3>5. Try run with config</h3>
 <code>pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf</code>
-check output. You must see all you nodes thresholds. 
+<br/>check output. You must see all you nodes and satellites thresholds. 
 
 <h3>6. Check mailer</h3>
 <code>pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf testmail</code>
-check you inbox and spam folders.
+<br/>check you inbox and spam folders.
 
 <h3>7. Setup service</h3>
 Create systemd service. See https://github.com/Krey81/Storj/blob/master/Storj3Monitor/Storj3Monitor.service
