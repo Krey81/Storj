@@ -33,6 +33,7 @@ pwsh ./Storj3Monitor.ps1
 script run with default config
 you can ask default config with pwsh ./Storj3Monitor.ps1 example
 
+<pre>
 {
   "Threshold": 0.2,
   "Mail": {
@@ -41,6 +42,7 @@ you can ask default config with pwsh ./Storj3Monitor.ps1 example
   "WaitSeconds": 300,
   "Nodes": "127.0.0.1:14002"
 }
+</pre>
 
 4. Create config
 Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples
