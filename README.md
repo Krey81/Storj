@@ -28,7 +28,7 @@ https://github.com/PowerShell/PowerShell
 
 <h3>2. Download script</h3>
 <code>
-mkdir /etc/scripts/storj<br/>
+mkdir /etc/scripts/storj
 cd /etc/scripts/storj<br/>
 curl -O https://raw.githubusercontent.com/Krey81/Storj/master/Storj3Monitor/Storj3Monitor.ps1<br/>
 </code>
