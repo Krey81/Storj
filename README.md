@@ -54,11 +54,11 @@ you can ask default config with pwsh ./Storj3Monitor.ps1 example
 Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples <br/>
 
 <ul>
-  <li>Storj3Monitor-builtinMail.conf</li>
+  <li><b>Storj3Monitor-builtinMail.conf</b></li>
   Send with powershell built-in mailer
-  <li>Storj3Monitor-linuxMail.conf</li>
+  <li><b>Storj3Monitor-linuxMail.conf</b></li>
   Send with linux mail command
-  <li>Send with google (https://support.google.com/a/answer/176600)
+  <li><b>Send with google</b> (https://support.google.com/a/answer/176600)
     <ul>
       <li>Storj3Monitor-google-to-other.conf (column 2)</li>  
       <li>Storj3Monitor-google-to-google.conf (column 3)</li>  
