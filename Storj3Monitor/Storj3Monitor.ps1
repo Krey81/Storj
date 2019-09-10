@@ -75,8 +75,10 @@ function Preamble{
     Write-Host "mail-to: krey@irinium.ru"
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
-    Write-Host -ForegroundColor DarkGray "Why should I send something if everything works like that ?"
-    Write-Host -ForegroundColor DarkGray "... see TODO comments in the script body"
+    Write-Host -ForegroundColor Gray "This wallet only for beer. Only beer will be bought from this wallet."
+    Write-Host -ForegroundColor Gray "I will think later how to arrange it in the form of a public contract. Now you have only my promise. Just for lulz."
+    Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
+    Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
     Write-Host ""
 }
 
