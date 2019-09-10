@@ -16,21 +16,21 @@ Node 1...U down uptime from 1 to 0,6 on 12L9<br/>
 !WARNING! NEW WALLET 0x...<br/>
 
 
-<b>Install on Linux</b>
+<h2>Install on Linux</h2>
 
-0. Check if powershell already installed<br/>
+<h3>0. Check if powershell already installed</h3>
   run 'pwsh' or 'powershell' command<br/>
 
-1. Install powershell.core<br/>
+<h3>1. Install powershell.core</h3>
 https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-core-on-linux?view=powershell-6
 https://github.com/PowerShell/PowerShell
 
-2. Download script<br/>
+<h3>2. Download script</h3>
 mkdir /etc/scripts/storj<br/>
 cd /etc/scripts/storj<br/>
 curl -O https://raw.githubusercontent.com/Krey81/Storj/master/Storj3Monitor/Storj3Monitor.ps1<br/>
 
-3. First run<br/>
+<h3>3. First run</h3>
 pwsh ./Storj3Monitor.ps1
 
 script run with default config
@@ -47,7 +47,7 @@ you can ask default config with pwsh ./Storj3Monitor.ps1 example
 }
 </pre>
 
-4. Create config<br/>
+<h3>4. Create config</h3>
 Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples <br/>
 
 <ul>
@@ -57,8 +57,8 @@ Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/Confi
   Send with linux mail command
   <li>Send with google (https://support.google.com/a/answer/176600)
     <ul>
-      <li>Storj3Monitor-google-to-other.conf</li>  
-      <li>Storj3Monitor-google-to-google.conf</li>  
+      <li>Storj3Monitor-google-to-other.conf (column 2)</li>  
+      <li>Storj3Monitor-google-to-google.conf (column 3)</li>  
     </ul>
   </li>
   
@@ -67,15 +67,15 @@ Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/Confi
 Make your own config. Specify nodes and mailer configuration. <br/>
 So you create /etc/scripts/storj/Storj3Monitor.my.conf
 
-5. Try run with config<br/>
+<h3>5. Try run with config</h3>
 pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf
 check output. You must see all you nodes thresholds. 
 
-5. Check mailer<br/>
+<h3>6. Check mailer</h3>
 pwsh ./Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf testmail
 check you inbox and spam folders.
 
-7. Setup service<br/>
+<h3>7. Setup service</h3>
 Create systemd service. See https://github.com/Krey81/Storj/blob/master/Storj3Monitor/Storj3Monitor.service
 
 <pre>
@@ -94,9 +94,9 @@ ExecStop=/bin/kill --signal SIGINT ${MAINPID}
 WantedBy=multi-user.target
 </pre>
 
-8. Enable service <br/>
+<h3>8. Enable service </h3>
 systemctl enable Storj3Monitor.service
 
-9. Reboot and check <br/>
+<h3>9. Reboot and check</h3>
 systemctl status Storj3Monitor<br/>
 will be <Active: active (running)>
