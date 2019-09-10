@@ -47,9 +47,9 @@ you can ask default config with pwsh ./Storj3Monitor.ps1 example
 }
 </pre>
 
-4. Create config
-Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples
-Make your own config. Specify nodes and mailer configuration. 
+4. Create config<br/>
+Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples <br/>
+Make your own config. Specify nodes and mailer configuration. <br/>
 So you create /etc/scripts/storj/Storj3Monitor.my.conf
 
 5. Try run with config<br/>
