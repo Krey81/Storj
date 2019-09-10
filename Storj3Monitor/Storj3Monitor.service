@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/pwsh /etc/scripts/Storj3Monitor.ps1 -c /etc/scripts/Storj3Monitor.conf monitor #edit path
+ExecStart=/usr/bin/pwsh /etc/scripts/storj/Storj3Monitor.ps1 -c /etc/scripts/storj/Storj3Monitor.my.conf monitor
 ExecStop=/bin/kill --signal SIGINT ${MAINPID}
 
 [Install]
