@@ -973,7 +973,6 @@ if (-not [String]::IsNullOrEmpty($logfile)) {
 else {
     Write-Host "No log file specified. Read StdIn..."
     $line = 0
-    $mt = $true
     $buffer = New-Object System.Text.StringBuilder($maxrows)
     $lastReport = [System.DateTime]::Now
 
