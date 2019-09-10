@@ -16,3 +16,10 @@ Node 1...U down uptime from 1 to 0,6 on 12L9<br/>
 !WARNING! NEW WALLET 0x...<br/>
 
 
+<b>Install on Linux</b>
+
+1. Install powershell.core<br/>
+https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-core-on-linux?view=powershell-6
+https://github.com/PowerShell/PowerShell
+
+2. Download script
