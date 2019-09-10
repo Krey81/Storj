@@ -519,22 +519,3 @@ if ($args.Contains("testmail")) {
 else {
     $tab
 }
-
-#END OF SCRIPT Storj3Monitor.ps1 mail to krey@irinium.ru
-
-#END OF SCRIPT Storj3Monitor.ps1 mail to krey@irinium.ru
-
-#/etc/systemd/system/Storj3Monitor.service
-#[Unit]
-#Description=Storj v3 monitor by Krey
-##Requires=network.target
-#After=network-online.target
-#Wants=network-online.target
-#
-#[Service]
-#Type=simple
-#ExecStart=/usr/bin/pwsh /etc/scripts/Storj3Monitor.ps1 -c /etc/scripts/Storj3Monitor.conf monitor #edit path
-#ExecStop=/bin/kill --signal SIGINT ${MAINPID}
-#
-#[Install]
-#WantedBy=multi-user.target
