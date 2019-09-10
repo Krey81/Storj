@@ -49,6 +49,21 @@ you can ask default config with pwsh ./Storj3Monitor.ps1 example
 
 4. Create config<br/>
 Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples <br/>
+
+<ul>
+  <li>Storj3Monitor-builtinMail.conf</li>
+  Send with powershell built-in mailer
+  <li>Storj3Monitor-linuxMail.conf</li>
+  Send with linux mail command
+  <li>Send with google (https://support.google.com/a/answer/176600)
+    <ul>
+      <li>Storj3Monitor-google-to-other.conf</li>  
+      <li>Storj3Monitor-google-to-google.conf</li>  
+    </ul>
+  </li>
+  
+</ul>
+
 Make your own config. Specify nodes and mailer configuration. <br/>
 So you create /etc/scripts/storj/Storj3Monitor.my.conf
 
