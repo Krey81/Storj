@@ -69,7 +69,7 @@ $v = "0.3"
 #
 
 
-function Preamble{
+ function Preamble{
     Write-Host ""
     Write-Host ("Storj3Monitor script by Krey ver {0}" -f $v)
     Write-Host "mail-to: krey@irinium.ru"
