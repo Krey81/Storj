@@ -23,3 +23,32 @@ https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powersh
 https://github.com/PowerShell/PowerShell
 
 2. Download script
+mkdir /etc/scripts/storj
+cd /etc/scripts/storj
+wget https://raw.githubusercontent.com/Krey81/Storj/master/Storj3Monitor/Storj3Monitor.ps1
+
+3. First run
+pwsh ./Storj3Monitor.ps1
+
+script run with default config
+you can ask default config with pwsh ./Storj3Monitor.ps1 example
+
+{
+  "Threshold": 0.2,
+  "Mail": {
+    "MailAgent": "none"
+  },
+  "WaitSeconds": 300,
+  "Nodes": "127.0.0.1:14002"
+}
+
+4. Create config
+Look examples at https://github.com/Krey81/Storj/tree/master/Storj3Monitor/ConfigSamples
+Make your own config. Specify nodes and mailer configuration. 
+So you create /etc/scripts/storj/Storj3Monitor.my.conf
+
+
+
+
+
+
