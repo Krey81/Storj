@@ -102,4 +102,6 @@ WantedBy=multi-user.target
 
 <h3>9. Reboot and check</h3>
 <code>systemctl status Storj3Monitor</code>
-will be <Active: active (running)>
+will be 
+<pre><Active: active (running)></pre>
+
