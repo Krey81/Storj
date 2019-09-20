@@ -1,9 +1,9 @@
-# Storj3Monitor script by Krey
+﻿# Storj3Monitor script by Krey
 # this script gathers, aggregate displays and monitor all you node thresholds
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.4"
+$v = "0.4.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -36,7 +36,9 @@ $v = "0.4"
 #               -   Add wellknown satellite names in script
 #               -   Add wallknow node names (your nodes) in config (please check updated examples)
 #               -   Add last ping (older last contact) formated like d:h:m:s
-
+# v0.4.1   - 20190920
+#               -   fix for "new satellite" mails, thanks LordMerlin
+#               -   replace some in-script symbols and pseudographics symbols with byte array for workaround bad text editors, change encoding to UTF-8 with BOM, thanks underflow17
 #
 
 #TODO-Drink-and-cheers
@@ -216,7 +218,7 @@ function GetDayStatItem
         'Delete'    = 0
         'Bandwidth' = 0
     }
-    return New-Object –TypeName PSObject –Prop $p
+    return New-Object -TypeName PSObject –Prop $p
 }
 
 function GetScore
@@ -246,10 +248,13 @@ function GetScore
         }
     }
 
-    $stat.Value.Start = $m.Maximum
-    $stat.Value.Ingress = ($score | ForEach-Object {$_.BandwidthDaily.ingress.usage} | Measure-Object -Sum).Sum
-    $stat.Value.Egress = ($score | ForEach-Object {$_.BandwidthDaily.egress.usage} | Measure-Object -Sum).Sum
-    $stat.Value.Delete =  ($score | ForEach-Object {$_.BandwidthDaily.delete} | Measure-Object -Sum).Sum
+    #calc counters if needed
+    if (($null -ne $stat) -and ($null -ne $stat.Value)) {
+        $stat.Value.Start = $m.Maximum
+        $stat.Value.Ingress = ($score | ForEach-Object {$_.BandwidthDaily.ingress.usage} | Measure-Object -Sum).Sum
+        $stat.Value.Egress = ($score | ForEach-Object {$_.BandwidthDaily.egress.usage} | Measure-Object -Sum).Sum
+        $stat.Value.Delete =  ($score | ForEach-Object {$_.BandwidthDaily.delete} | Measure-Object -Sum).Sum
+    }
 
     $score
 }
@@ -349,12 +354,12 @@ function CheckNodes{
 
 
     # Check new satellites
-    $oldSat = $oldNodes.satellites | Select-Object -Unique
+    $oldSat = $oldNodes.satellites | Select-Object -ExpandProperty id -Unique
 
     #DEBUG drop some satellites
     #$oldSat = $oldSat | Sort-Object | Select-Object -First 2
 
-    $newSat = $newNodes.satellites | Select-Object -Unique | Where-Object {$oldSat -notcontains $_ }
+    $newSat = $newNodes.satellites | Select-Object -ExpandProperty id -Unique | Where-Object {$oldSat -notcontains $_ }
     if ($newSat.Count -gt 0) {
         $newSat | ForEach-Object {
             Out-Buffer -sb $sb -msg ("New satellite {0}" -f $_)
@@ -371,6 +376,7 @@ function CheckScore{
         $nodes,
         $oldScore
     )
+    $stat = GetDayStatItem
     $newScore = GetScore -nodes $nodes
 
     #DEBUG drop scores
@@ -532,7 +538,7 @@ function Monitor {
         ;
         if ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -gt 9) {
             $config.Canary = [System.DateTimeOffset]::Now
-            Out-Buffer -sb $sb -msg ("i'am alive {0}" -f $config.Canary)
+            Out-Buffer -sb $sb -msg ("storj3monitor is alive {0}" -f $config.Canary)
         }
 
         if ($sb.Length -gt 0) { SendMail -config $config -sb $sb }
@@ -554,10 +560,10 @@ function DisplayNodes {
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "N O D E S    S U M M A R Y"
 
     $nodes | Sort-Object Name | Format-Table `
-    @{n='Node'; e={$_.Name}}, `
-    @{n='LastContact'; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
-    @{n='Disk'; e={("{0} ({1} free)" -f ((GetPips -width 30 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used) * 1024 * 1024 * 1024)))}}, `
-    @{n='Bandwidth'; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used) * 1024 * 1024 * 1024)))}}
+    @{n="Node"; e={$_.Name}}, `
+    @{n="LastContact"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
+    @{n="Disk"; e={("{0} ({1} free)" -f ((GetPips -width 30 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used) * 1024 * 1024 * 1024)))}}, `
+    @{n="Bandwidth"; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used) * 1024 * 1024 * 1024)))}}
     Write-Host
 }
 
@@ -568,13 +574,13 @@ function DisplayScore {
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    S U M M A R Y"
 
     $score | Sort-Object SatelliteId, NodeName | Format-Table `
-    @{n='Satellite';e={("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId))) }}, `
-    @{n='Node'; e={$_.NodeName}}, `
-    @{n='Ingress    :';e={("{0} {1}" -f (GetPips -width 10 -max $stat.Ingress -current $_.BandwidthDaily.ingress.usage), (HumanBytes($_.BandwidthDaily.ingress.usage))) }}, `
-    @{n='Egress     :';e={("{0} {1}" -f (GetPips -width 10 -max $stat.Egress -current $_.BandwidthDaily.egress.usage), (HumanBytes($_.BandwidthDaily.egress.usage))) }}, `
-    @{n='Delete     :';e={("{0} {1}" -f (GetPips -width 10 -max $stat.Delete -current $_.BandwidthDaily.delete), (HumanBytes($_.BandwidthDaily.delete))) }}, `
-    @{n='Audit';e={Round($_.Audit)}}, `
-    @{n='Uptime';e={Round($_.Uptime)}}
+    @{n="Satellite";e={("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId))) }}, `
+    @{n="Node"; e={$_.NodeName}}, `
+    @{n="Ingress    :";e={("{0} {1}" -f (GetPips -width 10 -max $stat.Ingress -current $_.BandwidthDaily.ingress.usage), (HumanBytes($_.BandwidthDaily.ingress.usage))) }}, `
+    @{n="Egress     :";e={("{0} {1}" -f (GetPips -width 10 -max $stat.Egress -current $_.BandwidthDaily.egress.usage), (HumanBytes($_.BandwidthDaily.egress.usage))) }}, `
+    @{n="Delete     :";e={("{0} {1}" -f (GetPips -width 10 -max $stat.Delete -current $_.BandwidthDaily.delete), (HumanBytes($_.BandwidthDaily.delete))) }}, `
+    @{n="Audit";e={Round($_.Audit)}}, `
+    @{n="Uptime";e={Round($_.Uptime)}}
 
     Write-Host ("`t* Ingress, Egress, Delete counters starts from {0}" -f $stat.Start)
     Write-Host
@@ -617,16 +623,20 @@ function GraphTimeline
     if ($dataMax / $rowWidth -lt $height) { $height = $dataMax / $rowWidth }
 
     $graph = New-Object System.Collections.Generic.List[string]
-    $graph.Add("└".PadRight($lastCol + 1, "─"))
+
+    #workaround for bad text editors
+    $pseudoGraphicsSymbols = [System.Text.Encoding]::UTF8.GetString(([byte]226, 148,148,226,148,130,45,226,148,128))
+    if ($pseudoGraphicsSymbols.Length -ne 4) { throw "Error with pseudoGraphicsSymbols" }
+    $graph.Add($pseudoGraphicsSymbols[0].ToString().PadRight($lastCol + 1, $pseudoGraphicsSymbols[3]))
 
     1..$height | ForEach-Object {
         $r = $_
-        $line = "│"
+        $line = $pseudoGraphicsSymbols[1]
         1..$lastCol | ForEach-Object {
             $c = $_
             $v = $data[$c-1]
             $h = $v / $rowWidth
-            if ($h -ge $r ) {$line+="-"}
+            if ($h -ge $r ) {$line+=$pseudoGraphicsSymbols[2]}
             else {$line+=" "}
         }
         $graph.Add($line)
