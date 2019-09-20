@@ -376,7 +376,6 @@ function CheckScore{
         $nodes,
         $oldScore
     )
-    $stat = GetDayStatItem
     $newScore = GetScore -nodes $nodes
 
     #DEBUG drop scores
