@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.3"
+$v = "0.4"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -27,17 +27,28 @@ $v = "0.3"
 #               -   Fix config path search routines
 #               -   Add testmail command
 #               -   Add config examples
+# v0.4    - 20190919                            - [5 bottles withdraw]
+#               -   Changes due new api 0.21.1
+#               -   Add node summary
+#               -   Add satellite graphs
+#               -   Add pips
+#               -   Add delete counter
+#               -   Add wellknown satellite names in script
+#               -   Add wallknow node names (your nodes) in config (please check updated examples)
+#               -   Add last ping (older last contact) formated like d:h:m:s
+
+#
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
 #               -   Big thanks (10-bottles first), greatings for all versions of this script
 #               -   Telegram bot (100-bottles, sum), development telegtam bot to send messages
 #               -   The service (1000-bottles, sum), full time service for current and past functions on my dedicated servers
-#               -   The world's fist barter crypto-currency (1M [1kk for Russians], sum). You and I will create the world's first cryptocurrency, which is really worth something.
+#               -   The world's fist bottled crypto-currency (1M [1kk for Russians], sum). You and I will create the world's first cryptocurrency, which is really worth something.
 
 #TODO
 #               -   MQTT
-#
+#               -   SVG graphics
 #
 
 #USAGE          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -68,6 +79,12 @@ $v = "0.3"
 #       2. Create systemd service specify path to this script and configuration. Examples on github.
 #
 
+$wellKnownSat = @{
+    "118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW" = "stefan-benten";
+    "12EayRS2V1kEsWESU9QMRseFhdxYxKicsiFmxrsLZHeLUtdps3S" = "us-central-1";
+    "121RTSDpyNZVcEU84Ticf2L1ntiuUimbWgfATz21tuvgk3vzoA6" = "asia-east-1";
+    "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1"
+}
 
  function Preamble{
     Write-Host ""
@@ -76,7 +93,6 @@ $v = "0.3"
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
     Write-Host -ForegroundColor Gray "This wallet only for beer. Only beer will be bought from this wallet."
-    Write-Host -ForegroundColor Gray "I will think later how to arrange it in the form of a public contract. Now you have only my promise. Just for lulz."
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
     Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
     Write-Host ""
@@ -138,10 +154,9 @@ function LoadConfig{
         return $false
     }
     
-    $config = Get-Content -Path $file | ConvertFrom-Json 
+    $config = Get-Content -Path $file | ConvertFrom-Json
     return $config
 }
-
 
 function GetJson
 {
@@ -149,6 +164,7 @@ function GetJson
 
     #RAW
     # ((Invoke-WebRequest -Uri http://192.168.156.4:4404/api/dashboard).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://192.168.156.4:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
 
     $resp = Invoke-WebRequest -Uri $uri
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
@@ -167,12 +183,15 @@ function GetNodes
         $address = $_
         try {
             $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address)
+            $dash | Add-Member -NotePropertyName Address -NotePropertyValue $address
+            $dash | Add-Member -NotePropertyName Name -NotePropertyValue (GetNodeName -config $config -id $dash.nodeID)
             $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
 
             $dash.satellites | ForEach-Object {
-                $satid = $_
+                $satid = $_.id
                 try {
                     $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
+                    $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($_.disqualified)
                     $dash.Sat.Add($sat)
                 }
                 catch {
@@ -188,30 +207,65 @@ function GetNodes
     return $result
 }
 
+function GetDayStatItem
+{
+   $p = @{
+        'Start'     = 0
+        'Ingress'   = 0
+        'Egress'    = 0
+        'Delete'    = 0
+        'Bandwidth' = 0
+    }
+    return New-Object –TypeName PSObject –Prop $p
+}
+
 function GetScore
 {
-    param($nodes)
+    param($nodes, [ref]$stat)
     #$result = [System.Collections.Generic.List[PSObject]]@()
-    $nodes | Sort-Object nodeID | ForEach-Object {
+
+    $m = $nodes | `
+    Select-Object -ExpandProperty Sat | `
+    Select-Object -ExpandProperty BandwidthDaily | `
+    Select-Object -ExpandProperty intervalStart | `
+    Measure-Object -Minimum -Maximum 
+
+    $score = $nodes | Sort-Object nodeID | ForEach-Object {
         $node = $_
         $node.Sat | Sort-Object id | ForEach-Object {
             $sat = $_
             New-Object PSCustomObject -Property @{
                 Key = ("{0}-{1}" -f $node.nodeID, $sat.id)
                 NodeId = $node.nodeID
+                NodeName = $node.Name
                 SatelliteId = $sat.id
                 Audit = $sat.audit.score
                 Uptime = $sat.uptime.score
-                Ingress = $sat.bandwidthDaily.ingress.repair + $sat.bandwidthDaily.ingress.usage
-                Egress = $sat.bandwidthDaily.egress.repair + $sat.bandwidthDaily.egress.usage
+                BandwidthDaily = ($sat.bandwidthDaily | Where-Object {$_.intervalStart -eq $m.Maximum} | Select-Object -First 1)
             }
         }
     }
+
+    $stat.Value.Start = $m.Maximum
+    $stat.Value.Ingress = ($score | ForEach-Object {$_.BandwidthDaily.ingress.usage} | Measure-Object -Sum).Sum
+    $stat.Value.Egress = ($score | ForEach-Object {$_.BandwidthDaily.egress.usage} | Measure-Object -Sum).Sum
+    $stat.Value.Delete =  ($score | ForEach-Object {$_.BandwidthDaily.delete} | Measure-Object -Sum).Sum
+
+    $score
 }
+
 function Compact
 {
     param($id)
     return $id.Substring(0,4) + "-" + $id.Substring($id.Length-2)
+}
+
+function GetNodeName{
+    param ($config, $id)
+    $name = $config.WellKnownNodes."$id"
+    if ($null -eq $name) { $name = Compact($id) }
+    else {$name+= " (" + (Compact($id)) + ")"}
+    return $name
 }
 
 function Round
@@ -229,9 +283,19 @@ function HumanBytes {
         $level++
         $rest = $rest/1024
     }
+    #if ($rest -lt 0.001) { return [String]::Empty }
+    if ($rest -lt 0.001) { return "0" }
     $mant = [Math]::Max(3 - [Math]::Floor($rest).ToString().Length,0)
     return ("{0} {1}" -f [Math]::Round($rest,$mant), $suff[$level])
 }
+
+function HumanTime {
+    param ([TimeSpan]$time)
+    $str = ("{0:00}:{1:00}:{2:00}:{3:00}" -f $time.Days, $time.Hours, $time.Minutes, $time.Seconds)
+    while ($str.StartsWith("00:")) { $str = $str.TrimStart("00:") }
+    return $str
+}
+
 
 function Out-Buffer {
     param ($sb, $msg)
@@ -476,6 +540,138 @@ function Monitor {
     Write-Host "Stop monitoring"
 }
 
+function GetPips {
+    param ($width, $max, $current)
+    $val = $current/$max
+    $pips = [int]($width * $val )
+    $str = "[" + "".PadRight($pips, "-").PadRight($width, " ") + "] "
+    return $str
+}
+
+function DisplayNodes {
+    param ($nodes)
+    Write-Host
+    Write-Host -ForegroundColor Yellow -BackgroundColor Black "N O D E S    S U M M A R Y"
+
+    $nodes | Sort-Object Name | Format-Table `
+    @{n='Node'; e={$_.Name}}, `
+    @{n='LastContact'; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
+    @{n='Disk'; e={("{0} ({1} free)" -f ((GetPips -width 30 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used) * 1024 * 1024 * 1024)))}}, `
+    @{n='Bandwidth'; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used) * 1024 * 1024 * 1024)))}}
+    Write-Host
+}
+
+function DisplayScore {
+    param ($score, $stat)
+
+    Write-Host
+    Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    S U M M A R Y"
+
+    $score | Sort-Object SatelliteId, NodeName | Format-Table `
+    @{n='Satellite';e={("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId))) }}, `
+    @{n='Node'; e={$_.NodeName}}, `
+    @{n='Ingress    :';e={("{0} {1}" -f (GetPips -width 10 -max $stat.Ingress -current $_.BandwidthDaily.ingress.usage), (HumanBytes($_.BandwidthDaily.ingress.usage))) }}, `
+    @{n='Egress     :';e={("{0} {1}" -f (GetPips -width 10 -max $stat.Egress -current $_.BandwidthDaily.egress.usage), (HumanBytes($_.BandwidthDaily.egress.usage))) }}, `
+    @{n='Delete     :';e={("{0} {1}" -f (GetPips -width 10 -max $stat.Delete -current $_.BandwidthDaily.delete), (HumanBytes($_.BandwidthDaily.delete))) }}, `
+    @{n='Audit';e={Round($_.Audit)}}, `
+    @{n='Uptime';e={Round($_.Uptime)}}
+
+    Write-Host ("`t* Ingress, Egress, Delete counters starts from {0}" -f $stat.Start)
+    Write-Host
+}
+
+function GraphTimeline 
+{
+    param ($title, $decription, [int]$height, $fromTime, $toTime, $timeline)
+    $width = 160
+    if ($height -eq 0) { $height = 10 }
+    if ($fromTime -ge $toTime) {
+        Write-Host -ForegroundColor Red ("{0}: Bad timeline params. exiting." -f $title)
+        return
+    }
+    $lastSlot = ($timeline.Keys | Measure-Object -Maximum).Maximum
+
+
+    [int]$idx = 0
+    $colWidth = [int]([Math]::Floor([Math]::Max(1.0, $lastSlot / $width)))
+    $lastCol = [int][Math]::Ceiling($lastSlot/$colWidth)
+    $data = new-object long[] ($lastCol + 1)
+
+    #grouping to fit width
+    for ($i = 0; $i -le $lastCol; $i++)
+    {
+        for ($j = 0; $j -lt $colWidth; $j++)
+        {
+            $idx = $i * $colWidth + $j
+            if ($timeline.ContainsKey($idx)) { $data[$i]+=$timeline[$idx] }
+        }
+    }
+   
+    #max in groups while min in original data. otherwise min was zero in empty data cells
+    $dataMin = ($timeline.Values | Measure-Object -Minimum).Minimum
+    $dataMax = ($data | Measure-Object -Maximum).Maximum
+
+    #limit height to actual data
+    $rowWidth = ($dataMax - $dataMin) / $height
+    if ($rowWidth -lt $dataMin) { $rowWidth = $dataMin }
+    if ($dataMax / $rowWidth -lt $height) { $height = $dataMax / $rowWidth }
+
+    $graph = New-Object System.Collections.Generic.List[string]
+    $graph.Add("└".PadRight($lastCol + 1, "─"))
+
+    1..$height | ForEach-Object {
+        $r = $_
+        $line = "│"
+        1..$lastCol | ForEach-Object {
+            $c = $_
+            $v = $data[$c-1]
+            $h = $v / $rowWidth
+            if ($h -ge $r ) {$line+="-"}
+            else {$line+=" "}
+        }
+        $graph.Add($line)
+    }
+    $graph.Reverse()
+
+    Write-Host $title -NoNewline -ForegroundColor Yellow
+    if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
+    Write-Host
+    Write-Host ("Y-axis from {0} to {1}, cell = {2}" -f (HumanBytes($dataMin)), (HumanBytes($dataMax)), (HumanBytes($rowWidth))) -ForegroundColor Gray
+    $graph | ForEach-Object {Write-Host $_}
+    Write-Host -ForegroundColor Gray ("X-axis from {0:$hformat2} to {1:$hformat2}, cell = 1 day, total = {2} hours" -f $fromTime, $toTime, ([int](($toTime - $fromTime).TotalHours)))
+    Write-Host
+    Write-Host
+}
+
+function DisplaySat {
+    param ($nodes)
+    Write-Host
+    Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
+    Write-Host "Y-axis ingress + egress"
+    Write-Host
+    $now = [System.DateTimeOffset]::Now
+    ($nodes | Select-Object -ExpandProperty Sat) | Group-Object id | ForEach-Object {
+        #Write-Host $_.Name
+        $sat = $_
+        $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
+        $m = $bw | Measure-Object -Minimum -Maximum IntervalStart
+        $bd = $bw | Group-Object {$_.intervalStart.Day} | Sort-Object {[Int]::Parse($_.Name)}
+        $data = $bd | ForEach-Object {
+            $item = GetDayStatItem
+            $item.Start = $_.Name
+            $item.ingress = ($_.Group | ForEach-Object {$_.ingress.usage} | Measure-Object -Sum).Sum
+            $item.egress = ($_.Group | ForEach-Object {$_.egress.usage} | Measure-Object -Sum).Sum
+            $item.bandwidth = $item.ingress + $item.egress
+            $item
+        }
+        $timeline = New-Object "System.Collections.Generic.SortedList[int,long]"
+        $data | ForEach-Object { $timeline.Add([Int]::Parse($_.Start), $_.bandwidth) }
+        $title = ("{0}`t{1}" -f $wellKnownSat[$sat.Name], $sat.Name)
+        GraphTimeline -title $title -from $m.Minimum -to $m.Maximum -timeline $timeline
+    }
+    Write-Host
+}
+
 Preamble
 if ($args.Contains("example")) {
     $config = DefaultConfig
@@ -484,6 +680,9 @@ if ($args.Contains("example")) {
 }
 
 $config = LoadConfig -cmdlineArgs $args
+#DEBUG
+#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+
 if (-not $config) { return }
 
 $config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
@@ -493,29 +692,27 @@ $config | Add-Member -NotePropertyName Canary -NotePropertyValue $config.StartTi
 #$config.Canary = [System.DateTimeOffset]::Now.Subtract([System.TimeSpan]::FromDays(1))
 
 $nodes = GetNodes -config $config
-$score = GetScore -nodes $nodes
-$tab = $score | Sort-Object SatelliteId, NodeId | Format-Table `
-    @{n='Satellite';e={Compact($_.SatelliteId)}}, `
-    @{n='Node';e={Compact($_.NodeId)}}, `
-    @{n='Ingress';e={HumanBytes($_.Ingress)}}, `
-    @{n='Egress';e={HumanBytes($_.Egress)}}, `
-    @{n='Audit';e={Round($_.Audit)}}, `
-    @{n='Uptime';e={Round($_.Uptime)}}
+$stat = GetDayStatItem
+$score = GetScore -nodes $nodes -stat ([ref]$stat)
 
+    
 if ($args.Contains("monitor")) {
     [System.Text.StringBuilder]$sb = [System.Text.StringBuilder]::new()
     $sb.AppendLine(("Start monitoring {0} entries at {1}, {2} seconds cycle" -f $score.Count, $config.StartTime, $config.WaitSeconds)) | Out-Null
-    $sb.Append(($tab | Out-String)) | Out-Null
+    #$sb.Append(($tab | Out-String)) | Out-Null
     $sb.ToString()
 
     Monitor -config $config -sb $sb -oldNodes $nodes -oldScore $score
 }
-if ($args.Contains("testmail")) {
+elseif ($args.Contains("testmail")) {
     [System.Text.StringBuilder]$sb = [System.Text.StringBuilder]::new()
     $sb.AppendLine("Test mail. Configured {0} entries" -f $score.Count) | Out-Null
-    $sb.Append(($tab | Out-String)) | Out-Null
+    #$sb.Append(($tab | Out-String)) | Out-Null
     SendMail -config $config -sb $sb
 }
-else {
-    $tab
+elseif ($nodes.Count -gt 0) {
+    DisplaySat -nodes $nodes
+    DisplayNodes -nodes $nodes
+    DisplayScore -score $score -stat $stat
 }
+
