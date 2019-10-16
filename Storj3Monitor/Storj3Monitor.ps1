@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.4.1"
+$v = "0.4.2"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -39,19 +39,22 @@ $v = "0.4.1"
 # v0.4.1   - 20190920
 #               -   fix for "new satellite" mails, thanks LordMerlin
 #               -   replace some in-script symbols and pseudographics symbols with byte array for workaround bad text editors, change encoding to UTF-8 with BOM, thanks underflow17
-#
+# v0.4.2   - 20191010
+#               -   storj api changes
+#               -   Totals
+#               -   score counters month based
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
 #               -   Big thanks (10-bottles first), greatings for all versions of this script
-#               -   Telegram bot (100-bottles, sum), development telegtam bot to send messages
+#               -   Telegram bot (100-bottles, sum), development telegram bot to send messages
 #               -   The service (1000-bottles, sum), full time service for current and past functions on my dedicated servers
-#               -   The world's fist bottled crypto-currency (1M [1kk for Russians], sum). You and I will create the world's first cryptocurrency, which is really worth something.
+#               -   The world's fist bottle-based crypto-currency (1M [1kk for Russians], sum). You and I will create the world's first cryptocurrency, which is really worth something.
 
 #TODO
 #               -   MQTT
 #               -   SVG graphics
-#
+#               -   Script autoupdating
 
 #USAGE          !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 #
@@ -94,7 +97,6 @@ $wellKnownSat = @{
     Write-Host "mail-to: krey@irinium.ru"
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
-    Write-Host -ForegroundColor Gray "This wallet only for beer. Only beer will be bought from this wallet."
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
     Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
     Write-Host ""
@@ -165,8 +167,8 @@ function GetJson
     param($uri)
 
     #RAW
-    # ((Invoke-WebRequest -Uri http://192.168.156.4:4404/api/dashboard).content | ConvertFrom-Json).data
-    # ((Invoke-WebRequest -Uri http://192.168.156.4:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://localhost:4404/api/dashboard).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://localhost:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
 
     $resp = Invoke-WebRequest -Uri $uri
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
@@ -212,7 +214,8 @@ function GetNodes
 function GetDayStatItem
 {
    $p = @{
-        'Start'     = 0
+        'Start'     = $null
+        'End'       = $null
         'Ingress'   = 0
         'Egress'    = 0
         'Delete'    = 0
@@ -221,16 +224,46 @@ function GetDayStatItem
     return New-Object -TypeName PSObject –Prop $p
 }
 
+function AggBandwidth
+{
+    [CmdletBinding()]
+    Param(
+          [Parameter(ValueFromPipeline)]
+          $item
+         )    
+    begin {
+        $ingress = 0
+        $egress = 0
+        $delete = 0
+        $from = $null
+        $to = $null
+    }
+    process {
+        $ingress+=$item.ingress.usage
+        $egress+= $item.egress.usage
+        $delete+= $item.delete
+
+        if ($null -eq $from) { $from = $item.intervalStart}
+        elseif ($item.intervalStart -lt $from) { $from = $item.intervalStart}
+
+        if ($null -eq $to) { $to = $item.intervalStart}
+        elseif ($item.intervalStart -gt $to) { $to = $item.intervalStart}
+    }
+    end {
+        $p = @{
+            'Ingress'  = $ingress
+            'Egress'   = $egress
+            'Delete'   = $delete
+            'From'     = $from
+            'To'       = $to
+        }
+        Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
+    }
+}
+
 function GetScore
 {
     param($nodes, [ref]$stat)
-    #$result = [System.Collections.Generic.List[PSObject]]@()
-
-    $m = $nodes | `
-    Select-Object -ExpandProperty Sat | `
-    Select-Object -ExpandProperty BandwidthDaily | `
-    Select-Object -ExpandProperty intervalStart | `
-    Measure-Object -Minimum -Maximum 
 
     $score = $nodes | Sort-Object nodeID | ForEach-Object {
         $node = $_
@@ -243,17 +276,18 @@ function GetScore
                 SatelliteId = $sat.id
                 Audit = $sat.audit.score
                 Uptime = $sat.uptime.score
-                BandwidthDaily = ($sat.bandwidthDaily | Where-Object {$_.intervalStart -eq $m.Maximum} | Select-Object -First 1)
+                Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
             }
         }
     }
 
     #calc counters if needed
     if (($null -ne $stat) -and ($null -ne $stat.Value)) {
-        $stat.Value.Start = $m.Maximum
-        $stat.Value.Ingress = ($score | ForEach-Object {$_.BandwidthDaily.ingress.usage} | Measure-Object -Sum).Sum
-        $stat.Value.Egress = ($score | ForEach-Object {$_.BandwidthDaily.egress.usage} | Measure-Object -Sum).Sum
-        $stat.Value.Delete =  ($score | ForEach-Object {$_.BandwidthDaily.delete} | Measure-Object -Sum).Sum
+        $stat.Value.Start = ($score | ForEach-Object {$_.Bandwidth.From} | Measure-Object -Minimum).Minimum
+        $stat.Value.End = ($score | ForEach-Object {$_.Bandwidth.To} | Measure-Object -Maximum).Maximum
+        $stat.Value.Ingress = ($score | ForEach-Object {$_.Bandwidth.Ingress} | Measure-Object -Sum).Sum
+        $stat.Value.Egress = ($score | ForEach-Object {$_.Bandwidth.Egress} | Measure-Object -Sum).Sum
+        $stat.Value.Delete =  ($score | ForEach-Object {$_.Bandwidth.Delete} | Measure-Object -Sum).Sum
     }
 
     $score
@@ -546,8 +580,9 @@ function Monitor {
 }
 
 function GetPips {
-    param ($width, $max, $current)
-    $val = $current/$max
+    param ($width, [int64]$max, [int64]$current)
+    if ($max -gt 0) { $val = $current/$max }
+    else { $val = 0 }
     $pips = [int]($width * $val )
     $str = "[" + "".PadRight($pips, "-").PadRight($width, " ") + "] "
     return $str
@@ -561,9 +596,11 @@ function DisplayNodes {
     $nodes | Sort-Object Name | Format-Table `
     @{n="Node"; e={$_.Name}}, `
     @{n="LastContact"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
-    @{n="Disk"; e={("{0} ({1} free)" -f ((GetPips -width 30 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used) * 1024 * 1024 * 1024)))}}, `
-    @{n="Bandwidth"; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used) * 1024 * 1024 * 1024)))}}
-    Write-Host
+    @{n="Disk"; e={("{0} ({1} free)" -f ((GetPips -width 30 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used))))}}, `
+    @{n="Bandwidth"; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used))))}}
+    $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
+    $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
+    Write-Host ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
 }
 
 function DisplayScore {
@@ -572,16 +609,23 @@ function DisplayScore {
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    S U M M A R Y"
 
-    $score | Sort-Object SatelliteId, NodeName | Format-Table `
-    @{n="Satellite";e={("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId))) }}, `
-    @{n="Node"; e={$_.NodeName}}, `
-    @{n="Ingress    :";e={("{0} {1}" -f (GetPips -width 10 -max $stat.Ingress -current $_.BandwidthDaily.ingress.usage), (HumanBytes($_.BandwidthDaily.ingress.usage))) }}, `
-    @{n="Egress     :";e={("{0} {1}" -f (GetPips -width 10 -max $stat.Egress -current $_.BandwidthDaily.egress.usage), (HumanBytes($_.BandwidthDaily.egress.usage))) }}, `
-    @{n="Delete     :";e={("{0} {1}" -f (GetPips -width 10 -max $stat.Delete -current $_.BandwidthDaily.delete), (HumanBytes($_.BandwidthDaily.delete))) }}, `
-    @{n="Audit";e={Round($_.Audit)}}, `
-    @{n="Uptime";e={Round($_.Uptime)}}
+    $tab = [System.Collections.Generic.List[PSCustomObject]]@()
+    $score | Sort-Object SatelliteId, NodeName | ForEach-Object {
+        $p = @{
+            'Satellite' = ("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId)))
+            'Node'      = $_.NodeName
+            'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $stat.Ingress -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
+            'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $stat.Egress -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
+            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $stat.Delete -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
+            'Audit'     = Round($_.Audit)
+            'Uptime'    = Round($_.Uptime)
+            'Comment'   = [String]::Empty
+        }
+        $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
+    }
+    $tab.GetEnumerator() | Format-Table Satellite, Node, Ingress, Egress, Delete, Audit, Uptime, Comment
 
-    Write-Host ("`t* Ingress, Egress, Delete counters starts from {0}" -f $stat.Start)
+    Write-Host ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd}" -f (HumanBytes($stat.Ingress)), (HumanBytes($stat.Egress)), (HumanBytes($stat.Delete)), $stat.Start, $stat.End)
     Write-Host
 }
 
