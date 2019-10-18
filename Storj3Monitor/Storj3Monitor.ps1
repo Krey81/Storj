@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.4.2"
+$v = "0.4.3"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -43,6 +43,11 @@ $v = "0.4.2"
 #               -   storj api changes
 #               -   Totals
 #               -   score counters month based
+# v0.4.3   - 20191018
+#               -   add per-node info (satellite data grouped by nodes) - ingress, egress, audit, uptime
+#               -   change sat and node output order
+#               -   extended output in canopy warning
+#               -   misc
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -190,6 +195,9 @@ function GetNodes
             $dash | Add-Member -NotePropertyName Address -NotePropertyValue $address
             $dash | Add-Member -NotePropertyName Name -NotePropertyValue (GetNodeName -config $config -id $dash.nodeID)
             $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
+            $dash | Add-Member -NotePropertyName BwSummary -NotePropertyValue $null
+            $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
+            $dash | Add-Member -NotePropertyName Uptime -NotePropertyValue $null
 
             $dash.satellites | ForEach-Object {
                 $satid = $_.id
@@ -209,19 +217,6 @@ function GetNodes
         }
     }
     return $result
-}
-
-function GetDayStatItem
-{
-   $p = @{
-        'Start'     = $null
-        'End'       = $null
-        'Ingress'   = 0
-        'Egress'    = 0
-        'Delete'    = 0
-        'Bandwidth' = 0
-    }
-    return New-Object -TypeName PSObject –Prop $p
 }
 
 function AggBandwidth
@@ -261,9 +256,46 @@ function AggBandwidth
     }
 }
 
+function AggBandwidth2
+{
+    [CmdletBinding()]
+    Param(
+          [Parameter(ValueFromPipeline)]
+          $item
+         )    
+    begin {
+        $ingress = 0
+        $egress = 0
+        $delete = 0
+        $from = $null
+        $to = $null
+    }
+    process {
+        $ingress+=$item.Ingress
+        $egress+= $item.Egress
+        $delete+= $item.Delete
+
+        if ($null -eq $from) { $from = $item.From}
+        elseif ($item.From -lt $from) { $from = $item.From}
+
+        if ($null -eq $to) { $to = $item.To}
+        elseif ($item.To -gt $to) { $to = $item.To}
+    }
+    end {
+        $p = @{
+            'Ingress'  = $ingress
+            'Egress'   = $egress
+            'Delete'   = $delete
+            'From'     = $from
+            'To'       = $to
+        }
+        Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
+    }
+}
+
 function GetScore
 {
-    param($nodes, [ref]$stat)
+    param($nodes)
 
     $score = $nodes | Sort-Object nodeID | ForEach-Object {
         $node = $_
@@ -281,13 +313,13 @@ function GetScore
         }
     }
 
-    #calc counters if needed
-    if (($null -ne $stat) -and ($null -ne $stat.Value)) {
-        $stat.Value.Start = ($score | ForEach-Object {$_.Bandwidth.From} | Measure-Object -Minimum).Minimum
-        $stat.Value.End = ($score | ForEach-Object {$_.Bandwidth.To} | Measure-Object -Maximum).Maximum
-        $stat.Value.Ingress = ($score | ForEach-Object {$_.Bandwidth.Ingress} | Measure-Object -Sum).Sum
-        $stat.Value.Egress = ($score | ForEach-Object {$_.Bandwidth.Egress} | Measure-Object -Sum).Sum
-        $stat.Value.Delete =  ($score | ForEach-Object {$_.Bandwidth.Delete} | Measure-Object -Sum).Sum
+    #calc per node bandwidth
+    $score | Group-Object NodeId | ForEach-Object {
+        $nodeId = $_.Name
+        $node = $nodes | Where-Object {$_.NodeId -eq $nodeId} | Select-Object -First 1
+        $node.BwSummary = ($_.Group | Select-Object -ExpandProperty Bandwidth | AggBandwidth2)
+        $node.Audit = ($_.Group | Select-Object -ExpandProperty Audit | Measure-Object -Min).Minimum
+        $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Min).Minimum
     }
 
     $score
@@ -335,17 +367,10 @@ function HumanTime {
     return $str
 }
 
-
-function Out-Buffer {
-    param ($sb, $msg)
-    $sb.AppendLine($msg) | Out-Null
-    Write-Host $msg
-}
-
 function CheckNodes{
     param(
         $config, 
-        $sb,
+        $body,
         [ref]$oldNodesRef
     )
     $oldNodes = $oldNodesRef.Value
@@ -360,7 +385,8 @@ function CheckNodes{
     $failNodes = ($oldNodes | Where-Object { ($newNodes | Select-Object -ExpandProperty nodeID) -notcontains $_.nodeID })
     if ($failNodes.Count -gt 0) {
         $failNodes | ForEach-Object {
-            Out-Buffer -sb ($sb) -msg ("Disconnected from node {0}" -f $_.nodeID)
+            $nodeName = (GetNodeName -id $_.nodeID -config $config)
+            Write-Output ("Disconnected from node {0}" -f $nodeName) | Tee-Object -Append -FilePath $body
         }
     }
 
@@ -372,7 +398,7 @@ function CheckNodes{
             $testNode = $_
             $oldVersionStatus = $oldNodes | Where-Object { $_.nodeID -eq $testNode.nodeID } | Select-Object -First 1 -ExpandProperty upToDate
             if ($oldVersionStatus) {
-                Out-Buffer -sb ($sb) -msg ("Node {0} is old ({1}.{2}.{3})" -f $testNode.nodeID, $testNode.version.major, $testNode.version.minor, $testNode.version.patch)
+                Write-Output ("Node {0} is old ({1}.{2}.{3})" -f $testNode.nodeID, $testNode.version.major, $testNode.version.minor, $testNode.version.patch) | Tee-Object -Append -FilePath $body
             }
         }
     }
@@ -382,7 +408,7 @@ function CheckNodes{
     $newWal = $newNodes | Select-Object -ExpandProperty wallet -Unique | Where-Object {$oldWal -notcontains $_ }
     if ($newWal.Count -gt 0) {
         $newWal | ForEach-Object {
-            Out-Buffer -sb $sb -msg ("!WARNING! NEW WALLET {0}" -f $_)
+            Write-Output ("!WARNING! NEW WALLET {0}" -f $_) | Tee-Object -Append -FilePath $body
         }
     }
 
@@ -396,7 +422,7 @@ function CheckNodes{
     $newSat = $newNodes.satellites | Select-Object -ExpandProperty id -Unique | Where-Object {$oldSat -notcontains $_ }
     if ($newSat.Count -gt 0) {
         $newSat | ForEach-Object {
-            Out-Buffer -sb $sb -msg ("New satellite {0}" -f $_)
+            Write-Output ("New satellite {0}" -f $_) | Tee-Object -Append -FilePath $body
         }
     }
 
@@ -406,7 +432,7 @@ function CheckNodes{
 function CheckScore{
     param(
         $config, 
-        $sb,
+        $body,
         $nodes,
         $oldScore
     )
@@ -422,13 +448,13 @@ function CheckScore{
         if ($null -ne $old){
             $idx = $oldScore.IndexOf($old)
             if ($old.Audit -ge ($new.Audit + $config.Threshold)) {
-                Out-Buffer -sb ($sb) -msg ("Node {0} down audit from {1} to {2} on {3}" -f $new.nodeID, $old.Audit, $new.Audit, $new.SatelliteId)
+                Write-Output ("Node {0} down audit from {1} to {2} on {3}" -f $new.nodeID, $old.Audit, $new.Audit, $new.SatelliteId) | Tee-Object -Append -FilePath $body
                 $oldScore[$idx].Audit = $new.Audit
             }
             elseif ($new.Audit -gt $old.Audit) { $oldScore[$idx].Audit = $new.Audit }
 
             if ($old.Uptime -ge ($new.Uptime + $config.Threshold)) {
-                Out-Buffer -sb ($sb) -msg ("Node {0} down uptime from {1} to {2} on {3}" -f $new.nodeID, $old.Uptime, $new.Uptime, $new.SatelliteId)
+                Write-Output ("Node {0} down uptime from {1} to {2} on {3}" -f $new.nodeID, $old.Uptime, $new.Uptime, $new.SatelliteId) | Tee-Object -Append -FilePath $body
                 $oldScore[$idx].Uptime = $new.Uptime
             }
             elseif ($new.Uptime -gt $old.Uptime) { $oldScore[$idx].Uptime = $new.Uptime }
@@ -462,14 +488,11 @@ function ExecCommand {
 function SendMailLinux{
     param(
         $config, 
-        $sb
+        $body
     )
 
     ;
-    $body = [System.IO.Path]::GetTempFileName()
     try {
-        [System.IO.File]::WriteAllText($body, $sb.ToString())
-
         $catParam = "'{0}'" -f $body
         $mailParam = "-s '{0}' {1}" -f $config.Mail.Subj, $config.Mail.To
         $bashParam = ('-c "cat {0} | mail {1}"' -f $catParam, $mailParam)
@@ -477,25 +500,16 @@ function SendMailLinux{
 
         Write-Host ("Mail sent to {0} via linux agent" -f $config.Mail.To)
         if ($output.Length -gt 0) { Write-Host $output }
-        $sb.Clear() | Out-Null
-        Write-Host "Buffer cleared"
     }
     catch {
         Write-Host -ForegroundColor Red ($_.Exception.Message)        
     }
-    finally {
-        try {
-            #if ([System.IO.File]::Exists($body)) { [System.IO.File]::Delete($body) }    
-        }
-        catch { }
-    }
-
 }
 
 function SendMailPowershell{
     param(
         $config, 
-        $sb
+        $body
     )
     try {
         $pd = $config.Mail.AuthPass | ConvertTo-SecureString -asPlainText -Force
@@ -513,7 +527,7 @@ function SendMailPowershell{
                 -To ($config.Mail.To) `
                 -From ($config.Mail.From) `
                 -Subject ($config.Mail.Subj) `
-                -Body ($sb.ToString()) `
+                -Body ([System.IO.File]::ReadAllText($body)) `
                 -UseSsl: $ssl `
                 -SmtpServer ($config.Mail.Smtp) `
                 -Port ($config.Mail.Port) `
@@ -521,8 +535,6 @@ function SendMailPowershell{
                 -ErrorAction Stop
             
             Write-Host ("Mail sent to {0} via powershell agent" -f $config.Mail.To)
-            $sb.Clear() | Out-Null
-            Write-Host "Buffer cleared"
         }
         catch 
         {
@@ -542,14 +554,11 @@ function SendMailPowershell{
 function SendMail{
     param(
         $config, 
-        $sb
+        $body
     )
 
-    if ($null -eq $config.Mail -or $config.Mail.MailAgent -eq "none") { 
-        $sb.Clear() | Out-Null
-    }
-    elseif ($config.Mail.MailAgent -eq "powershell") { SendMailPowershell -config $config -sb $sb }
-    elseif ($config.Mail.MailAgent -eq "linux") { SendMailLinux -config $config -sb $sb }
+    if ($config.Mail.MailAgent -eq "powershell") { SendMailPowershell -config $config -body $body }
+    elseif ($config.Mail.MailAgent -eq "linux") { SendMailLinux -config $config -body $body }
     else {
         Write-Host -ForegroundColor Red "Mail not properly configuried"
     }
@@ -558,23 +567,31 @@ function SendMail{
 function Monitor {
     param (
         $config, 
-        $sb, 
+        $body, 
         $oldNodes,
         $oldScore
     )
 
+    #DEBUG canopy
+    #$config.Canary = [System.DateTimeOffset]::Now.Subtract([System.TimeSpan]::FromDays(1))
+
     while ($true) {
         Start-Sleep -Seconds $config.WaitSeconds
-        CheckNodes -config $config -sb $sb -oldNodesRef ([ref]$oldNodes)
-        CheckScore -config $config -sb $sb -nodes $oldNodes -oldScore $oldScore
+        CheckNodes -config $config -body $body -oldNodesRef ([ref]$oldNodes)
+        CheckScore -config $config -body $body -nodes $oldNodes -oldScore $oldScore
 
-        ;
-        if ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -gt 9) {
+        # Canopy warning
+        #DEBUG check hour, must be 10
+        if (($null -eq $config.Canary) -or ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -ge 10)) {
             $config.Canary = [System.DateTimeOffset]::Now
-            Out-Buffer -sb $sb -msg ("storj3monitor is alive {0}" -f $config.Canary)
+            Write-Output ("storj3monitor is alive {0}" -f $config.Canary) | Tee-Object -Append -FilePath $body
+            DisplayNodes -nodes $oldNodes >>$body
         }
-
-        if ($sb.Length -gt 0) { SendMail -config $config -sb $sb }
+        if ((Get-Item -Path $body).Length -gt 0)
+        {
+            SendMail -config $config -body $body
+            $null>$body
+        }
     }
     Write-Host "Stop monitoring"
 }
@@ -589,34 +606,46 @@ function GetPips {
 }
 
 function DisplayNodes {
-    param ($nodes)
-    Write-Host
+    param ($nodes, $bwsummary)
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "N O D E S    S U M M A R Y"
+
+    if ($null -eq $bwsummary) {
+        $bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+    }
 
     $nodes | Sort-Object Name | Format-Table `
     @{n="Node"; e={$_.Name}}, `
     @{n="LastContact"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
-    @{n="Disk"; e={("{0} ({1} free)" -f ((GetPips -width 30 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used))))}}, `
-    @{n="Bandwidth"; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used))))}}
+    @{n="Audit"; e={Round($_.Audit)}}, `
+    @{n="Uptime"; e={Round($_.Uptime)}}, `
+    @{n="Disk"; e={("{0} ({1} free)" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used))))}}, `
+    @{n="Bandwidth"; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used))))}}, `
+    @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
+    @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
+    @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}
+
     $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
     $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
-    Write-Host ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
+
+    Write-Output ("Stat time is {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
+    Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
+    Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd} on {5} nodes" -f (HumanBytes($bwsummary.Ingress)), (HumanBytes($bwsummary.Egress)), (HumanBytes($bwsummary.Delete)), $bwsummary.From, $bwsummary.To, $nodes.Count)
 }
 
 function DisplayScore {
-    param ($score, $stat)
+    param ($score, $bwsummary)
 
     Write-Host
-    Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    S U M M A R Y"
+    Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    D E T A I L S"
 
     $tab = [System.Collections.Generic.List[PSCustomObject]]@()
     $score | Sort-Object SatelliteId, NodeName | ForEach-Object {
         $p = @{
             'Satellite' = ("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId)))
             'Node'      = $_.NodeName
-            'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $stat.Ingress -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
-            'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $stat.Egress -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
-            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $stat.Delete -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
+            'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Ingress -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
+            'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
+            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'Uptime'    = Round($_.Uptime)
             'Comment'   = [String]::Empty
@@ -625,7 +654,6 @@ function DisplayScore {
     }
     $tab.GetEnumerator() | Format-Table Satellite, Node, Ingress, Egress, Delete, Audit, Uptime, Comment
 
-    Write-Host ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd}" -f (HumanBytes($stat.Ingress)), (HumanBytes($stat.Egress)), (HumanBytes($stat.Delete)), $stat.Start, $stat.End)
     Write-Host
 }
 
@@ -696,8 +724,21 @@ function GraphTimeline
     Write-Host
 }
 
+function GetDayStatItem
+{
+   $p = @{
+        'Start'     = $null
+        'End'       = $null
+        'Ingress'   = 0
+        'Egress'    = 0
+        'Delete'    = 0
+        'Bandwidth' = 0
+    }
+    return New-Object -TypeName PSObject –Prop $p
+}
+
 function DisplaySat {
-    param ($nodes)
+    param ($nodes, $bw)
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
     Write-Host "Y-axis ingress + egress"
@@ -739,33 +780,30 @@ $config = LoadConfig -cmdlineArgs $args
 if (-not $config) { return }
 
 $config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
-$config | Add-Member -NotePropertyName Canary -NotePropertyValue $config.StartTime
-
-#DEBUG check Canary
-#$config.Canary = [System.DateTimeOffset]::Now.Subtract([System.TimeSpan]::FromDays(1))
+$config | Add-Member -NotePropertyName Canary -NotePropertyValue $null
 
 $nodes = GetNodes -config $config
-$stat = GetDayStatItem
-$score = GetScore -nodes $nodes -stat ([ref]$stat)
+$score = GetScore -nodes $nodes
+$bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
 
-    
+#DEBUG    
 if ($args.Contains("monitor")) {
-    [System.Text.StringBuilder]$sb = [System.Text.StringBuilder]::new()
-    $sb.AppendLine(("Start monitoring {0} entries at {1}, {2} seconds cycle" -f $score.Count, $config.StartTime, $config.WaitSeconds)) | Out-Null
-    #$sb.Append(($tab | Out-String)) | Out-Null
-    $sb.ToString()
+    $body = [System.IO.Path]::GetTempFileName()
+    Write-Output ("Start monitoring {0} entries at {1}, {2} seconds cycle" -f $score.Count, $config.StartTime, $config.WaitSeconds) | Tee-Object -FilePath $body
+    Write-Host ("Output to {0}" -f $body)
 
-    Monitor -config $config -sb $sb -oldNodes $nodes -oldScore $score
+    Monitor -config $config -body $body -oldNodes $nodes -oldScore $score
+    [System.IO.File]::Delete($body)
 }
 elseif ($args.Contains("testmail")) {
-    [System.Text.StringBuilder]$sb = [System.Text.StringBuilder]::new()
-    $sb.AppendLine("Test mail. Configured {0} entries" -f $score.Count) | Out-Null
-    #$sb.Append(($tab | Out-String)) | Out-Null
-    SendMail -config $config -sb $sb
+    $body = [System.IO.Path]::GetTempFileName()
+    Write-Output ("Test mail. Configured {0} entries" -f $score.Count) | Tee-Object -FilePath $body
+    SendMail -config $config -body $body
+    [System.IO.File]::Delete($body)
 }
 elseif ($nodes.Count -gt 0) {
     DisplaySat -nodes $nodes
-    DisplayNodes -nodes $nodes
-    DisplayScore -score $score -stat $stat
+    DisplayScore -score $score -bwsummary $bwsummary
+    DisplayNodes -nodes $nodes -bwsummary $bwsummary
 }
 
