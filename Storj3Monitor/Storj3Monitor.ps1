@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.4.3"
+$v = "0.4.4"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -48,6 +48,11 @@ $v = "0.4.3"
 #               -   change sat and node output order
 #               -   extended output in canopy warning
 #               -   misc
+# v0.4.4   - 20191113
+#               -   reorder columns in nodes summary, add disk used column
+#               -   revised graph design
+#               -   add egress and ingress cmdline params
+#               -   traffic daily graph
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -69,7 +74,7 @@ $v = "0.4.3"
 #
 #
 #   Display only for specefied nodes
-#       pwsh ./Storj3Monitor.ps1 -c <config-file>
+#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress]
 #
 #
 #   Test config and mail sender
@@ -248,6 +253,8 @@ function AggBandwidth
         $p = @{
             'Ingress'  = $ingress
             'Egress'   = $egress
+            'TotalBandwidth'= $ingress + $egress
+            'MaxBandwidth'= [Math]::Max($ingress, $egress)
             'Delete'   = $delete
             'From'     = $from
             'To'       = $to
@@ -615,21 +622,31 @@ function DisplayNodes {
 
     $nodes | Sort-Object Name | Format-Table `
     @{n="Node"; e={$_.Name}}, `
-    @{n="LastContact"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
+    @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
     @{n="Audit"; e={Round($_.Audit)}}, `
     @{n="Uptime"; e={Round($_.Uptime)}}, `
-    @{n="Disk"; e={("{0} ({1} free)" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)), (HumanBytes(($_.diskSpace.available - $_.diskSpace.used))))}}, `
-    @{n="Bandwidth"; e={("{0} ({1} free)" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)), (HumanBytes(($_.bandwidth.available - $_.bandwidth.used))))}}, `
-    @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
+    @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
+    @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
+    @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
     @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
-    @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}
+    @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
+    @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
+    @{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
+    @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} 
 
     $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
     $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
 
-    Write-Output ("Stat time is {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
     Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
-    Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd} on {5} nodes" -f (HumanBytes($bwsummary.Ingress)), (HumanBytes($bwsummary.Egress)), (HumanBytes($bwsummary.Delete)), $bwsummary.From, $bwsummary.To, $nodes.Count)
+    Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd} on {5} nodes. Stat time {6:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f 
+        (HumanBytes($bwsummary.Ingress)), 
+        (HumanBytes($bwsummary.Egress)), 
+        (HumanBytes($bwsummary.Delete)), 
+        $bwsummary.From, 
+        $bwsummary.To, 
+        $nodes.Count, 
+        [DateTimeOffset]::Now
+    )
 }
 
 function DisplayScore {
@@ -657,58 +674,67 @@ function DisplayScore {
     Write-Host
 }
 
-function GraphTimeline 
+function GraphTimeline
 {
-    param ($title, $decription, [int]$height, $fromTime, $toTime, $timeline)
-    $width = 160
-    if ($height -eq 0) { $height = 10 }
-    if ($fromTime -ge $toTime) {
-        Write-Host -ForegroundColor Red ("{0}: Bad timeline params. exiting." -f $title)
-        return
+    param ($title, $decription, [int]$height, $bandwidth, $ingress, $egress)
+    $limitH = $false
+    if ($height -eq 0) { 
+        $height = 10
+        $limitH = $true
     }
-    $lastSlot = ($timeline.Keys | Measure-Object -Maximum).Maximum
 
+    $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
+    $timeline = New-Object "System.Collections.Generic.SortedList[int, PSCustomObject]"
+    $bd | ForEach-Object { $timeline.Add([Int]::Parse($_.Name), ($_.Group | AggBandwidth)) }
 
-    [int]$idx = 0
-    $colWidth = [int]([Math]::Floor([Math]::Max(1.0, $lastSlot / $width)))
-    $lastCol = [int][Math]::Ceiling($lastSlot/$colWidth)
-    $data = new-object long[] ($lastCol + 1)
-
-    #grouping to fit width
-    for ($i = 0; $i -le $lastCol; $i++)
-    {
-        for ($j = 0; $j -lt $colWidth; $j++)
-        {
-            $idx = $i * $colWidth + $j
-            if ($timeline.ContainsKey($idx)) { $data[$i]+=$timeline[$idx] }
-        }
-    }
-   
     #max in groups while min in original data. otherwise min was zero in empty data cells
-    $dataMin = ($timeline.Values | Measure-Object -Minimum).Minimum
-    $dataMax = ($data | Measure-Object -Maximum).Maximum
+    $lastCol = ($timeline.Keys | Measure-Object -Maximum).Maximum
+    $dataMin = ($timeline.Values | Measure-Object -Minimum -Property MaxBandwidth).Minimum
+    $dataMax = ($timeline.Values | Measure-Object -Maximum -Property MaxBandwidth).Maximum
 
-    #limit height to actual data
     $rowWidth = ($dataMax - $dataMin) / $height
-    if ($rowWidth -lt $dataMin) { $rowWidth = $dataMin }
-    if ($dataMax / $rowWidth -lt $height) { $height = $dataMax / $rowWidth }
+    if ($limitH) {
+        #limit height to actual data
+        if ($rowWidth -lt $dataMin) { $rowWidth = $dataMin }
+        if ($dataMax / $rowWidth -lt $height) { $height = $dataMax / $rowWidth }
+    }
 
     $graph = New-Object System.Collections.Generic.List[string]
 
     #workaround for bad text editors
     $pseudoGraphicsSymbols = [System.Text.Encoding]::UTF8.GetString(([byte]226, 148,148,226,148,130,45,226,148,128))
     if ($pseudoGraphicsSymbols.Length -ne 4) { throw "Error with pseudoGraphicsSymbols" }
-    $graph.Add($pseudoGraphicsSymbols[0].ToString().PadRight($lastCol + 1, $pseudoGraphicsSymbols[3]))
+    $sb = New-Object System.Text.StringBuilder(1)
+    1..$lastCol | ForEach-Object { 
+        $sb.Append(("{0:00} " -f $_)) | Out-Null
+    } 
+    $graph.Add(" " + $sb.ToString())
+    $graph.Add($pseudoGraphicsSymbols[0].ToString().PadRight($lastCol*3 + 1, $pseudoGraphicsSymbols[3]))
+
+    $fill1 = "   "
+    $fill2 = $pseudoGraphicsSymbols[2] + $pseudoGraphicsSymbols[2] + " "
 
     1..$height | ForEach-Object {
         $r = $_
         $line = $pseudoGraphicsSymbols[1]
         1..$lastCol | ForEach-Object {
             $c = $_
-            $v = $data[$c-1]
-            $h = $v / $rowWidth
-            if ($h -ge $r ) {$line+=$pseudoGraphicsSymbols[2]}
-            else {$line+=" "}
+            $agg = $timeline[$c]
+            $h = ($agg.MaxBandwidth - $dataMin) / $rowWidth
+            if ($h -ge $r ) {
+                $hi = ($agg.Ingress - $dataMin) / $rowWidth
+                $he = ($agg.Egress - $dataMin) / $rowWidth
+                if (-not ($ingress -xor $egress)) {
+                    if ($hi -ge $r -and $he -ge $r) { $line+="ie " }
+                    elseif ($hi -ge $r) { $line+="i  " }
+                    elseif ($he -ge $r) { $line+=" e " }
+                }
+                else {
+                    if (($ingress -and $hi -ge $r) -or ($egress -and $he -ge $r)) { $line+=$fill2 }
+                    else {$line+=$fill1}
+                }
+            }
+            else {$line+=$fill1}
         }
         $graph.Add($line)
     }
@@ -719,7 +745,6 @@ function GraphTimeline
     Write-Host
     Write-Host ("Y-axis from {0} to {1}, cell = {2}" -f (HumanBytes($dataMin)), (HumanBytes($dataMax)), (HumanBytes($rowWidth))) -ForegroundColor Gray
     $graph | ForEach-Object {Write-Host $_}
-    Write-Host -ForegroundColor Gray ("X-axis from {0:$hformat2} to {1:$hformat2}, cell = 1 day, total = {2} hours" -f $fromTime, $toTime, ([int](($toTime - $fromTime).TotalHours)))
     Write-Host
     Write-Host
 }
@@ -738,7 +763,7 @@ function GetDayStatItem
 }
 
 function DisplaySat {
-    param ($nodes, $bw)
+    param ($nodes, $bw, $ingress = $false, $egress = $false)
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
     Write-Host "Y-axis ingress + egress"
@@ -748,22 +773,15 @@ function DisplaySat {
         #Write-Host $_.Name
         $sat = $_
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
-        $m = $bw | Measure-Object -Minimum -Maximum IntervalStart
-        $bd = $bw | Group-Object {$_.intervalStart.Day} | Sort-Object {[Int]::Parse($_.Name)}
-        $data = $bd | ForEach-Object {
-            $item = GetDayStatItem
-            $item.Start = $_.Name
-            $item.ingress = ($_.Group | ForEach-Object {$_.ingress.usage} | Measure-Object -Sum).Sum
-            $item.egress = ($_.Group | ForEach-Object {$_.egress.usage} | Measure-Object -Sum).Sum
-            $item.bandwidth = $item.ingress + $item.egress
-            $item
-        }
-        $timeline = New-Object "System.Collections.Generic.SortedList[int,long]"
-        $data | ForEach-Object { $timeline.Add([Int]::Parse($_.Start), $_.bandwidth) }
         $title = ("{0}`t{1}" -f $wellKnownSat[$sat.Name], $sat.Name)
-        GraphTimeline -title $title -from $m.Minimum -to $m.Maximum -timeline $timeline
+        GraphTimeline -title $title -bandwidth $bw -ingress $ingress -egress $egress
     }
     Write-Host
+}
+function DisplayTraffic {
+    param ($nodes, $ingress = $false, $egress = $false)
+    $bw = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
+    GraphTimeline -title "Traffic by days" -height 15 -bandwidth $bw -ingress $ingress -egress $egress
 }
 
 Preamble
@@ -785,7 +803,7 @@ $config | Add-Member -NotePropertyName Canary -NotePropertyValue $null
 $nodes = GetNodes -config $config
 $score = GetScore -nodes $nodes
 $bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
-
+;
 #DEBUG    
 if ($args.Contains("monitor")) {
     $body = [System.IO.Path]::GetTempFileName()
@@ -802,7 +820,8 @@ elseif ($args.Contains("testmail")) {
     [System.IO.File]::Delete($body)
 }
 elseif ($nodes.Count -gt 0) {
-    DisplaySat -nodes $nodes
+    DisplaySat -nodes $nodes -ingress ($args.Contains("ingress")) -egress ($args.Contains("egress"))
+    DisplayTraffic -nodes $nodes -ingress ($args.Contains("ingress")) -egress ($args.Contains("egress"))
     DisplayScore -score $score -bwsummary $bwsummary
     DisplayNodes -nodes $nodes -bwsummary $bwsummary
 }
