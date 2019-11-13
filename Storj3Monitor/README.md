@@ -6,7 +6,7 @@ this script gathers, aggregate displays and monitor all you node thresholds
 if uptime or audit down by [threshold] script send email to you
   
 
-![Alt text](https://user-images.githubusercontent.com/38987544/64577594-8a8b3200-d385-11e9-82c3-03e38e1ee92d.png?raw=true "Title")
+![Alt text](https://user-images.githubusercontent.com/38987544/68793935-02fcc080-065f-11ea-850d-c3ca6d46d373.png?raw=true "Screenshot")
 
 If something wrong with your nodes you can receive messages like this:
 
