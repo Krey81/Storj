@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.4.4"
+$v = "0.4.5"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -53,6 +53,8 @@ $v = "0.4.4"
 #               -   revised graph design
 #               -   add egress and ingress cmdline params
 #               -   traffic daily graph
+# v0.4.5   - 20191114
+#               -   fix int32 overwlow, fix div by zero 
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -232,9 +234,9 @@ function AggBandwidth
           $item
          )    
     begin {
-        $ingress = 0
-        $egress = 0
-        $delete = 0
+        [long]$ingress = 0
+        [long]$egress = 0
+        [long]$delete = 0
         $from = $null
         $to = $null
     }
@@ -692,7 +694,13 @@ function GraphTimeline
     $dataMin = ($timeline.Values | Measure-Object -Minimum -Property MaxBandwidth).Minimum
     $dataMax = ($timeline.Values | Measure-Object -Maximum -Property MaxBandwidth).Maximum
 
-    $rowWidth = ($dataMax - $dataMin) / $height
+    if ($dataMax -eq 0) { 
+        Write-Host -ForegroundColor Red ("{0}: no traffic data" -f $title)
+        return
+    }
+    elseif ($dataMax -eq $dataMin) { $rowWidth = $dataMax / $height}
+    else { $rowWidth = ($dataMax - $dataMin) / $height }
+
     if ($limitH) {
         #limit height to actual data
         if ($rowWidth -lt $dataMin) { $rowWidth = $dataMin }
