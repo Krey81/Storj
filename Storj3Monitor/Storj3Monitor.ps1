@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.5"
+$v = "0.5.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -59,6 +59,9 @@ $v = "0.5"
 #               -   revised pips
 #               -   powershell 5 (default in win10) compatibility
 #               -   fix some bugs 
+# v0.5.1   - 20191115
+#               -   fix last ping issue from win nodes
+#               -   add last ping monitoring, config value LastPingWarningMinutes, default 30
 
 
 #TODO-Drink-and-cheers
@@ -177,17 +180,25 @@ function LoadConfig{
         Write-Host -ForegroundColor Red "No config was specified. Use defaults."
         Write-Host "Run 'Storj3Monitor.ps1 example' to retrieve default config"
         $config = DefaultConfig        
-        return $config
+    }
+    else {
+        $argfile = $cmdlineArgs[$idx + 1]
+        $file = GetFullPath -file $argfile
+        if ([String]::IsNullOrEmpty($file) -or (-not [System.IO.File]::Exists($file))) {
+            Write-Host -ForegroundColor Red ("config file {0} not found" -f $argfile)
+            return $false
+        }
+        
+        $config = Get-Content -Path $file | ConvertFrom-Json
     }
 
-    $argfile = $cmdlineArgs[$idx + 1]
-    $file = GetFullPath -file $argfile
-    if ([String]::IsNullOrEmpty($file) -or (-not [System.IO.File]::Exists($file))) {
-        Write-Host -ForegroundColor Red ("config file {0} not found" -f $argfile)
-        return $false
-    }
+    $config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
+    $config | Add-Member -NotePropertyName Canary -NotePropertyValue $null
     
-    $config = Get-Content -Path $file | ConvertFrom-Json
+    if ($null -eq $config.LastPingWarningMinutes) { 
+        $config | Add-Member -NotePropertyName LastPingWarningMinutes -NotePropertyValue 30
+    }
+
     return $config
 }
 
@@ -215,6 +226,15 @@ function FixDateSat {
     }
 }
 
+function FixNode {
+    param($node)
+    try {
+        if ($node.lastPinged.GetType().Name -eq "String") { $node.lastPinged = [DateTimeOffset]::Parse($node.lastPinged)}
+        elseif ($node.lastPinged.GetType().Name -eq "DateTime") { $node.lastPinged = [DateTimeOffset]$node.lastPinged }
+    }
+    catch { Write-Host -ForegroundColor Red $_.Exception.Message }
+}
+
 function GetNodes
 {
     param ($config)
@@ -224,12 +244,14 @@ function GetNodes
         $address = $_
         try {
             $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address)
+            FixNode($dash)
             $dash | Add-Member -NotePropertyName Address -NotePropertyValue $address
             $dash | Add-Member -NotePropertyName Name -NotePropertyValue (GetNodeName -config $config -id $dash.nodeID)
             $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
             $dash | Add-Member -NotePropertyName BwSummary -NotePropertyValue $null
             $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
             $dash | Add-Member -NotePropertyName Uptime -NotePropertyValue $null
+            $dash | Add-Member -NotePropertyName LastPingWarningValue -NotePropertyValue 0
 
             $dash.satellites | ForEach-Object {
                 $satid = $_.id
@@ -472,6 +494,26 @@ function CheckNodes{
         }
     }
 
+    #DEBUG
+    #$newNodes[0].lastPinged = [System.DateTimeOffset]::Now - [TimeSpan]::FromMinutes(55)
+
+    #Check last ping
+    $newNodes | ForEach-Object {
+        #restore old value
+        $id = $_.nodeID
+        $old = $oldNodes | Where-Object {$_.nodeID -eq $id } | Select-Object -First 1
+        if ($null -ne $old) { $_.LastPingWarningValue = $old.LastPingWarningValue }
+
+        $lostMin = [int](([DateTimeOffset]::Now - $_.lastPinged).TotalMinutes)
+        if (($_.LastPingWarningValue -eq 0) -and ($lostMin -ge $config.LastPingWarningMinutes)) {
+            Write-Output ("Node {0} last ping greater than {1} minutes" -f $_.Name, $lostMin) | Tee-Object -Append -FilePath $body
+            $_.LastPingWarningValue = $lostMin
+        }
+        elseif (($_.LastPingWarningValue -ge $config.LastPingWarningMinutes) -and ($lostMin -lt $config.LastPingWarningMinutes)) {
+            $_.LastPingWarningValue = 0
+            Write-Output ("Node {0} back online" -f $_.Name)
+        }
+    }
     $oldNodesRef.Value = $newNodes
 }
 
@@ -636,7 +678,7 @@ function Monitor {
         if ((Get-Item -Path $body).Length -gt 0)
         {
             SendMail -config $config -body $body
-            $null>$body
+            Clear-Content -Path $body
         }
     }
     Write-Host "Stop monitoring"
@@ -679,7 +721,7 @@ function DisplayNodes {
 
     $nodes | Sort-Object Name | Format-Table `
     @{n="Node"; e={$_.Name}}, `
-    @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
+    @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
     @{n="Audit"; e={Round($_.Audit)}}, `
     @{n="Uptime"; e={Round($_.Uptime)}}, `
     @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
@@ -857,9 +899,6 @@ $config = LoadConfig -cmdlineArgs $args
 #$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
 
 if (-not $config) { return }
-
-$config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
-$config | Add-Member -NotePropertyName Canary -NotePropertyValue $null
 
 $nodes = GetNodes -config $config
 $score = GetScore -nodes $nodes
