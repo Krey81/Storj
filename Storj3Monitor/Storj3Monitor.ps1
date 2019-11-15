@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.4.5"
+$v = "0.5"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -55,6 +55,11 @@ $v = "0.4.5"
 #               -   traffic daily graph
 # v0.4.5   - 20191114
 #               -   fix int32 overwlow, fix div by zero 
+# v0.5     - 20191115 (first anniversary version)
+#               -   revised pips
+#               -   powershell 5 (default in win10) compatibility
+#               -   fix some bugs 
+
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -103,9 +108,21 @@ $wellKnownSat = @{
     "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1"
 }
 
+
+function IsAnniversaryVersion {
+    param($vstr)
+    $standardBootleVolumeLitters = 0.5
+    $vstr = [String]::Join(".", ($vstr.Split('.') | Select-Object -First 2) )
+    $vdec = [Decimal]::Parse($vstr, [CultureInfo]::InvariantCulture)
+    if (($vdec % $standardBootleVolumeLitters) -eq 0.0) { return $true }
+    else { return $false }
+}
+
  function Preamble{
     Write-Host ""
-    Write-Host ("Storj3Monitor script by Krey ver {0}" -f $v)
+    Write-Host -NoNewline ("Storj3Monitor script by Krey ver {0}" -f $v)
+    if (IsAnniversaryVersion($v)) { Write-Host -ForegroundColor Green "`t- Anniversary version: Astrologers proclaim the week of incredible bottled income" }
+    else { Write-Host }
     Write-Host "mail-to: krey@irinium.ru"
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
@@ -190,6 +207,14 @@ function GetJson
     return $json
 }
 
+# For powershell v5 compatibility
+function FixDateSat {
+    param($sat)
+    for ($i=0; $i -lt $sat.bandwidthDaily.Length; $i++) {
+        $sat.bandwidthDaily[$i].intervalStart = [DateTimeOffset]$sat.bandwidthDaily[$i].intervalStart
+    }
+}
+
 function GetNodes
 {
     param ($config)
@@ -210,6 +235,7 @@ function GetNodes
                 $satid = $_.id
                 try {
                     $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
+                    if ($sat.bandwidthDaily.Length -gt 0 -and $sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
                     $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($_.disqualified)
                     $dash.Sat.Add($sat)
                 }
@@ -274,15 +300,23 @@ function AggBandwidth2
          )    
     begin {
         $ingress = 0
+        $ingressMax = 0
         $egress = 0
+        $egressMax = 0
         $delete = 0
+        $deleteMax = 0
         $from = $null
         $to = $null
     }
     process {
         $ingress+=$item.Ingress
+        if ($item.Ingress -gt $ingressMax) { $ingressMax = $item.Ingress }
+        
         $egress+= $item.Egress
+        if ($item.Egress -gt $egressMax) { $egressMax = $item.Egress }
+
         $delete+= $item.Delete
+        if ($item.Delete -gt $deleteMax) { $deleteMax = $item.Delete }
 
         if ($null -eq $from) { $from = $item.From}
         elseif ($item.From -lt $from) { $from = $item.From}
@@ -292,11 +326,14 @@ function AggBandwidth2
     }
     end {
         $p = @{
-            'Ingress'  = $ingress
-            'Egress'   = $egress
-            'Delete'   = $delete
-            'From'     = $from
-            'To'       = $to
+            'Ingress'       = $ingress
+            'IngressMax'    = $ingressMax
+            'Egress'        = $egress
+            'EgressMax'     = $egressMax
+            'Delete'        = $delete
+            'DeleteMax'     = $deleteMax
+            'From'          = $from
+            'To'            = $to
         }
         Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
     }
@@ -606,12 +643,27 @@ function Monitor {
 }
 
 function GetPips {
-    param ($width, [int64]$max, [int64]$current)
+    param ($width, [int64]$max, [int64]$current, [int64]$maxg = $null)
+
     if ($max -gt 0) { $val = $current/$max }
     else { $val = 0 }
     $pips = [int]($width * $val )
-    $str = "[" + "".PadRight($pips, "-").PadRight($width, " ") + "] "
+    $pipsg = 0
+
+    if (($null -ne $maxg) -and ($maxg -gt 0)) {
+        $valg = $current/$maxg
+        $pipsg = [int]($width * $valg)
+        $str = "[" + "".PadRight($pips, "=").PadRight($pipsg, "-").PadRight($width, " ") + "] "
+    }
+    else {
+        $str = "[" + "".PadRight($pips, "-").PadRight($width, " ") + "] "
+    }
+
     return $str
+}
+
+function DisplayPips {
+    param($width, $bandwidth, $name)
 }
 
 function DisplayNodes {
@@ -622,6 +674,9 @@ function DisplayNodes {
         $bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
     }
 
+    $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
+    $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
+
     $nodes | Sort-Object Name | Format-Table `
     @{n="Node"; e={$_.Name}}, `
     @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - [DateTimeOffset]::Parse($_.lastPinged))}}, `
@@ -630,14 +685,11 @@ function DisplayNodes {
     @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
     @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
     @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
-    @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
-    @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
-    @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
+    @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
+    @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
+    @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
     @{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
     @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} 
-
-    $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
-    $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
 
     Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
     Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd} on {5} nodes. Stat time {6:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f 
@@ -662,9 +714,9 @@ function DisplayScore {
         $p = @{
             'Satellite' = ("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId)))
             'Node'      = $_.NodeName
-            'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Ingress -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
-            'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
-            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
+            'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
+            'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
+            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'Uptime'    = Round($_.Uptime)
             'Comment'   = [String]::Empty
@@ -694,18 +746,12 @@ function GraphTimeline
     $dataMin = ($timeline.Values | Measure-Object -Minimum -Property MaxBandwidth).Minimum
     $dataMax = ($timeline.Values | Measure-Object -Maximum -Property MaxBandwidth).Maximum
 
-    if ($dataMax -eq 0) { 
+    if (($null -eq $dataMax) -or ($dataMax -eq 0)) { 
         Write-Host -ForegroundColor Red ("{0}: no traffic data" -f $title)
         return
     }
     elseif ($dataMax -eq $dataMin) { $rowWidth = $dataMax / $height}
     else { $rowWidth = ($dataMax - $dataMin) / $height }
-
-    if ($limitH) {
-        #limit height to actual data
-        if ($rowWidth -lt $dataMin) { $rowWidth = $dataMin }
-        if ($dataMax / $rowWidth -lt $height) { $height = $dataMax / $rowWidth }
-    }
 
     $graph = New-Object System.Collections.Generic.List[string]
 
@@ -722,6 +768,9 @@ function GraphTimeline
     $fill1 = "   "
     $fill2 = $pseudoGraphicsSymbols[2] + $pseudoGraphicsSymbols[2] + " "
 
+    $skip = 0
+    $first = $null
+    $line = $null
     1..$height | ForEach-Object {
         $r = $_
         $line = $pseudoGraphicsSymbols[1]
@@ -744,9 +793,21 @@ function GraphTimeline
             }
             else {$line+=$fill1}
         }
-        $graph.Add($line)
+        if (($null -eq $first) -or ($line -ne $first)) { 
+            $graph.Add($line) 
+            $first = $line
+        }
+        elseif (($null -ne $first) -and ($line -eq $first)) { $skip++ }
+        elseif (($null -ne $first) -and ($line -ne $first)) { 
+            $graph.Add($line)
+            $first = "xxx"
+        }
+
+        #else {$skip++}
     }
+    if ($skip -gt 0) { $graph[1] = $graph[1] + " * " + $skip.ToString() }
     $graph.Reverse()
+
 
     Write-Host $title -NoNewline -ForegroundColor Yellow
     if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
@@ -757,24 +818,16 @@ function GraphTimeline
     Write-Host
 }
 
-function GetDayStatItem
-{
-   $p = @{
-        'Start'     = $null
-        'End'       = $null
-        'Ingress'   = 0
-        'Egress'    = 0
-        'Delete'    = 0
-        'Bandwidth' = 0
-    }
-    return New-Object -TypeName PSObject –Prop $p
-}
-
 function DisplaySat {
     param ($nodes, $bw, $ingress = $false, $egress = $false)
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
-    Write-Host "Y-axis ingress + egress"
+    Write-Host "Legenda:"
+    Write-Host "`ti `t-ingress"
+    Write-Host "`te `t-egress"
+    Write-Host "`t= `t-pips from all bandwidth"
+    Write-Host "`t- `t-pips from node bandwidth, or simple percent line"
+    Write-Host "`t* n `t-down line supressed n times"
     Write-Host
     $now = [System.DateTimeOffset]::Now
     ($nodes | Select-Object -ExpandProperty Sat) | Group-Object id | ForEach-Object {
@@ -834,3 +887,5 @@ elseif ($nodes.Count -gt 0) {
     DisplayNodes -nodes $nodes -bwsummary $bwsummary
 }
 
+#DEBUG
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf
