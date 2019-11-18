@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.5.1"
+$v = "0.5.2"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -62,7 +62,9 @@ $v = "0.5.1"
 # v0.5.1   - 20191115
 #               -   fix last ping issue from win nodes
 #               -   add last ping monitoring, config value LastPingWarningMinutes, default 30
-
+# v0.5.2   - 20191119
+#               -   add -d param; -d only current day, -d -10 current-10 day, -d 3 last 3 days
+#               -   send mail when last ping restored
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -235,9 +237,29 @@ function FixNode {
     catch { Write-Host -ForegroundColor Red $_.Exception.Message }
 }
 
+function FilterBandwidth {
+    param ($bw, $query)
+    if ($null -eq $query.Days) { return $bw }
+    elseif ($query.Days -le 0) {
+        $is = ($bw[$bw.Count - 1 + $query.Days]).IntervalStart
+        return $bw | Where-Object { ($_.IntervalStart.Year -eq $is.Year) -and ($_.IntervalStart.Month -eq $is.Month) -and ($_.IntervalStart.Day -eq $is.Day) }
+    }
+    elseif ($query.Days -gt 0) {
+        $is = ($bw[$bw.Count - 1]).IntervalStart
+        $from = ($bw[$bw.Count - $query.Days]).IntervalStart.Day
+        $to = $is.Day
+        return $bw | Where-Object { 
+            ($_.IntervalStart.Year -eq $is.Year) -and 
+            ($_.IntervalStart.Month -eq $is.Month) -and 
+            ($_.IntervalStart.Day -ge $from) -and
+            ($_.IntervalStart.Day -le $to)
+        }
+    }
+}
+
 function GetNodes
 {
-    param ($config)
+    param ($config, $query)
     $result = [System.Collections.Generic.List[PSCustomObject]]@()
     
     $config.Nodes | ForEach-Object {
@@ -257,7 +279,10 @@ function GetNodes
                 $satid = $_.id
                 try {
                     $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
-                    if ($sat.bandwidthDaily.Length -gt 0 -and $sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
+                    if ($sat.bandwidthDaily.Length -gt 0) { 
+                        if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
+                        $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
+                    }
                     $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($_.disqualified)
                     $dash.Sat.Add($sat)
                 }
@@ -511,7 +536,7 @@ function CheckNodes{
         }
         elseif (($_.LastPingWarningValue -ge $config.LastPingWarningMinutes) -and ($lostMin -lt $config.LastPingWarningMinutes)) {
             $_.LastPingWarningValue = 0
-            Write-Output ("Node {0} back online" -f $_.Name)
+            Write-Output ("Node {0} last ping back to normal ({1} minutes)" -f $_.Name, $lostMin) | Tee-Object -Append -FilePath $body
         }
     }
     $oldNodesRef.Value = $newNodes
@@ -772,18 +797,15 @@ function DisplayScore {
 
 function GraphTimeline
 {
-    param ($title, $decription, [int]$height, $bandwidth, $ingress, $egress)
-    $limitH = $false
-    if ($height -eq 0) { 
-        $height = 10
-        $limitH = $true
-    }
+    param ($title, $decription, [int]$height, $bandwidth, $query)
+    if ($height -eq 0) { $height = 10 }
 
     $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
     $timeline = New-Object "System.Collections.Generic.SortedList[int, PSCustomObject]"
     $bd | ForEach-Object { $timeline.Add([Int]::Parse($_.Name), ($_.Group | AggBandwidth)) }
 
     #max in groups while min in original data. otherwise min was zero in empty data cells
+    $firstCol = ($timeline.Keys | Measure-Object -Minimum).Minimum
     $lastCol = ($timeline.Keys | Measure-Object -Maximum).Maximum
     $dataMin = ($timeline.Values | Measure-Object -Minimum -Property MaxBandwidth).Minimum
     $dataMax = ($timeline.Values | Measure-Object -Maximum -Property MaxBandwidth).Maximum
@@ -801,7 +823,7 @@ function GraphTimeline
     $pseudoGraphicsSymbols = [System.Text.Encoding]::UTF8.GetString(([byte]226, 148,148,226,148,130,45,226,148,128))
     if ($pseudoGraphicsSymbols.Length -ne 4) { throw "Error with pseudoGraphicsSymbols" }
     $sb = New-Object System.Text.StringBuilder(1)
-    1..$lastCol | ForEach-Object { 
+    $firstCol..$lastCol | ForEach-Object { 
         $sb.Append(("{0:00} " -f $_)) | Out-Null
     } 
     $graph.Add(" " + $sb.ToString())
@@ -816,20 +838,20 @@ function GraphTimeline
     1..$height | ForEach-Object {
         $r = $_
         $line = $pseudoGraphicsSymbols[1]
-        1..$lastCol | ForEach-Object {
+        $firstCol..$lastCol | ForEach-Object {
             $c = $_
             $agg = $timeline[$c]
             $h = ($agg.MaxBandwidth - $dataMin) / $rowWidth
             if ($h -ge $r ) {
                 $hi = ($agg.Ingress - $dataMin) / $rowWidth
                 $he = ($agg.Egress - $dataMin) / $rowWidth
-                if (-not ($ingress -xor $egress)) {
+                if (-not ($query.Ingress -xor $query.Egress)) {
                     if ($hi -ge $r -and $he -ge $r) { $line+="ie " }
                     elseif ($hi -ge $r) { $line+="i  " }
                     elseif ($he -ge $r) { $line+=" e " }
                 }
                 else {
-                    if (($ingress -and $hi -ge $r) -or ($egress -and $he -ge $r)) { $line+=$fill2 }
+                    if (($query.Ingress -and $hi -ge $r) -or ($query.Egress -and $he -ge $r)) { $line+=$fill2 }
                     else {$line+=$fill1}
                 }
             }
@@ -837,7 +859,8 @@ function GraphTimeline
         }
         if (($null -eq $first) -or ($line -ne $first)) { 
             $graph.Add($line) 
-            $first = $line
+            #allow skips only for full month
+            if ($null -eq $query.Days) { $first = $line }
         }
         elseif (($null -ne $first) -and ($line -eq $first)) { $skip++ }
         elseif (($null -ne $first) -and ($line -ne $first)) { 
@@ -861,7 +884,7 @@ function GraphTimeline
 }
 
 function DisplaySat {
-    param ($nodes, $bw, $ingress = $false, $egress = $false)
+    param ($nodes, $bw, $query)
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
     Write-Host "Legenda:"
@@ -877,14 +900,14 @@ function DisplaySat {
         $sat = $_
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
         $title = ("{0}`t{1}" -f $wellKnownSat[$sat.Name], $sat.Name)
-        GraphTimeline -title $title -bandwidth $bw -ingress $ingress -egress $egress
+        GraphTimeline -title $title -bandwidth $bw -query $query
     }
     Write-Host
 }
 function DisplayTraffic {
-    param ($nodes, $ingress = $false, $egress = $false)
+    param ($nodes, $query)
     $bw = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
-    GraphTimeline -title "Traffic by days" -height 15 -bandwidth $bw -ingress $ingress -egress $egress
+    GraphTimeline -title "Traffic by days" -height 15 -bandwidth $bw -query $query
 }
 
 Preamble
@@ -900,7 +923,33 @@ $config = LoadConfig -cmdlineArgs $args
 
 if (-not $config) { return }
 
-$nodes = GetNodes -config $config
+function GetQuery {
+    param($cmdlineArgs)
+
+    $days = $null
+    $index = $cmdlineArgs.IndexOf("-d")
+    if ($index -ge 0) {
+        if (($cmdlineArgs.Count -ge $index + 1) -and [System.Int32]::TryParse($cmdlineArgs[$index + 1], [ref]$days)) {
+            if ($days -eq 0) { Write-Host "Query today" }
+            elseif ($days -lt 0) { Write-Host ("Query today {0}" -f $days) }
+            elseif ($days -gt 0) { Write-Host ("Query {0} last days" -f $days) }
+        }
+        else {
+            $days = 0
+            Write-Host "Query today"
+        }
+    }
+
+    $query = @{
+        Ingress = $cmdlineArgs.Contains("ingress")
+        Egress = $cmdlineArgs.Contains("egress")
+        Days = $days
+    }
+    return $query
+}
+
+$query = GetQuery -cmdlineArgs $args
+$nodes = GetNodes -config $config -query $query
 $score = GetScore -nodes $nodes
 $bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
 ;
@@ -920,8 +969,10 @@ elseif ($args.Contains("testmail")) {
     [System.IO.File]::Delete($body)
 }
 elseif ($nodes.Count -gt 0) {
-    DisplaySat -nodes $nodes -ingress ($args.Contains("ingress")) -egress ($args.Contains("egress"))
-    DisplayTraffic -nodes $nodes -ingress ($args.Contains("ingress")) -egress ($args.Contains("egress"))
+    if ($null -eq $query.Days -or $query.Days -gt 0) {
+        DisplaySat -nodes $nodes -query $query
+        DisplayTraffic -nodes $nodes -query $query
+    }
     DisplayScore -score $score -bwsummary $bwsummary
     DisplayNodes -nodes $nodes -bwsummary $bwsummary
 }
