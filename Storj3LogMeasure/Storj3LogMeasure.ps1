@@ -13,10 +13,13 @@
 #         - add well-known satellites check
 # v0.6    - 20190809 polished
 # v0.7    - 20190910 published on github
+# v0.7.1  - 20191119 
+#         - updating to last storagenode logs (v0.25.1)
+#         - recoding MP jobs via files, i ran into 12k scriptblock barrier
 
 
 # TODO
-# Req00  - Performance
+# Req00  - Performance (x4 in multi-threading)
 # Req01  - Combine completed and failed graphs
 # Req02  - [del]Monitor (alert) functionality to email, mqtt, telegramm[/del] moved to Storj3Monior
 # Req03  - SVG graphs and html output
@@ -43,14 +46,12 @@
 #where
 #logFile - path to file
 #ST - Single Thread mode
-
-
  param (
     [string]$logFile,
     [switch]$st
  )
+$sriptVersion = "v0.7.1"
 
-$sriptVersion = "v0.7"
 $maxrows = 20000
 $timeSpan = [Timespan]::FromMinutes(15)
 
@@ -96,7 +97,6 @@ function GetLogMessage
 
 function GetResult
 {
-    #$logResult = [hashtable]::Synchronized(@{
     $result = @{
         NodeId                = ""
 
@@ -254,17 +254,26 @@ function Acc
     if ($null -ne $jsonstr) {
         $json = ConvertFrom-Json $jsonstr
         $action = $json.Action
-        $satId = $json.SatelliteID
+        $satId = $null
+        if ($null -ne "$json.Satellite ID") { $satId = $json."Satellite ID" }
+        elseif ($null -ne "$json.SatelliteID") { $satId = $json.SatelliteID }
         $sat = $null
 
         # store all errors to logresult
-        if ($null -ne $json.error) {
-            StoreError -collection $logResult.Errors -text $json.error
+        $jsonErrorParsed = $json.error
+        if ($null -ne $jsonErrorParsed) {
+            if ($json.error.StartsWith("piecestore: piecestore protocol: write tcp")) {
+                # "piecestore: piecestore protocol: write tcp 192.168.155.1:4301->87.106.194.21:47216: use of closed network connection"
+                if ($json.error -match "^piecestore: piecestore protocol: write tcp (?<from>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5}))->(?<to>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5}))\:\s?(?<err>.+)") {
+                    $jsonErrorParsed = "write tcp: " + $Matches["err"]
+                }
+            }
+            StoreError -collection $logResult.Errors -text $jsonErrorParsed
         }
 
         if ([String]::IsNullOrEmpty($key))
         {
-            if ($null -eq $json.error) { Write-Host $message + " " + $jsonstr -ForegroundColor Gray }
+            if ($null -eq $jsonErrorParsed) { Write-Host $message + " " + $jsonstr -ForegroundColor Gray }
         }
         elseif (-not [String]::IsNullOrEmpty($satId))
         {
@@ -302,8 +311,8 @@ function Acc
                 $act.Count++
                 AddTimeline -timeline $act.Timeline -timeSlot $timeSlot
 
-                if ($null -ne $json.error) { 
-                    StoreError -collection $act.Errors -text $json.error 
+                if ($null -ne $jsonErrorParsed) { 
+                    StoreError -collection $act.Errors -text $jsonErrorParsed
                 }
             }
         }
@@ -330,15 +339,18 @@ function ParseLogString
     }
 
     if (-not [String]::IsNullOrEmpty($result.Time)) {
-        $hFormat = "yyyy-MM-ddTHH:mm:ss.fffZ"
+        $hFormat  = "yyyy-MM-ddTHH:mm:ss.fffZ"
+        $hFormat2  = "yyyy-MM-ddTHH:mm:ss.fffzzz"
         [ref]$logTimeRef = [DateTimeOffset]::MinValue
         if ([DateTimeOffset]::TryParseExact($result.Time, $hFormat, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, $logTimeRef)) {
             $result.HaveTime = $true
             $result.TimeParsed = $logTimeRef.Value.DateTime
         }
+        elseif ([DateTimeOffset]::TryParseExact($result.Time, $hFormat2, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, $logTimeRef)) {
+            $result.HaveTime = $true
+            $result.TimeParsed = $logTimeRef.Value.DateTime
+        }
     }
-
-
     return $result
 }
 
@@ -346,12 +358,8 @@ function ParseLogMessage
 {
     param ($logResult, $lm)
 
-    if ($null -ne $lm.Source) {
-
-        # Storage message
-        if ($lm.Source.StartsWith("piecestore",[System.StringComparison]::OrdinalIgnoreCase)) { 
-            Acc -logResult $logResult -level $lm.Level -source $lm.Source -message $lm.Message -jsonstr $lm.Json -timeSlot $lm.TimeSlot
-        }
+    if (($null -ne $lm.Source) -and $lm.Source.StartsWith("piecestore",[System.StringComparison]::OrdinalIgnoreCase)) {
+        Acc -logResult $logResult -level $lm.Level -source $lm.Source -message $lm.Message -jsonstr $lm.Json -timeSlot $lm.TimeSlot
     }
     elseif ($null -ne $lm.Message) {
         # Configuration message 
@@ -412,7 +420,7 @@ function ParseLogMessage
 
 function ProcessLogBlock
 {
-    param ([string[]]$logString, $logResult, $fromTime = [DateTime]::MaxValue, $first = $false)
+    param ([string[]]$logString, $logResult, $file = $null, $fromTime = [DateTime]::MaxValue, $first = $false)
     #TODO pass this vars to job procedures
     #$hFormat = "yyyy-MM-ddTHH:mm:ss.fffZ"
     #$hFormat2 = "yyyy-MM-dd HH:mm:ss"
@@ -424,8 +432,11 @@ function ProcessLogBlock
     }
 
     $logTimeEnd = $null
+    if (-not [String]::IsNullOrEmpty($file)) {
+        if (-not [System.IO.File]::Exists($file)) { throw "file not exists"}
+        $logString = [System.IO.File]::ReadAllLines($file)
+    }
 
-    #$logString | ForEach-Object 
     foreach ($str in $logString) {
         $logResult.LinesProcessed++
         $lm = ParseLogString -message $str
@@ -459,6 +470,7 @@ function ProcessLogBlock
     }
     $logResult.EndLog = $logTimeEnd
     $logResult.EndTime = [DateTime]::Now
+    #if (-not [String]::IsNullOrEmpty($file)) { [System.IO.File]::Delete($file) }
     return $logResult
 }
 
@@ -467,17 +479,22 @@ $init =
 function GetResult {$function:GetResult}
 function GetSat {$function:GetSat}
 function GetSatAction {$function:GetSatAction}
-function AddTimeline {$function:AddTimeline}
-function GetTimeSlot {$function:GetTimeSlot}
-function StoreError {$function:StoreError}
-function GetLogKey {$function:GetLogKey}
-function Acc {$function:Acc}
 function GetLogMessage {$function:GetLogMessage}
+function GetTimeSlot {$function:GetTimeSlot}
+function GetLogKey {$function:GetLogKey}
+function AddTimeline {$function:AddTimeline}
+function StoreError {$function:StoreError}
+function Acc {$function:Acc}
 function ParseLogString {$function:ParseLogString}
 function ParseLogMessage {$function:ParseLogMessage}
 function ProcessLogBlock {$function:ProcessLogBlock}
-
 "@)
+
+$tmp = [System.IO.Path]::GetTempFileName()
+$tmp = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($tmp),"Stroj3LogMonitor.job.ps1")
+[System.IO.File]::WriteAllText($tmp, $init, [System.Text.Encoding]::BigEndianUnicode)
+Write-Host ("Script block file:{0}" -f $tmp)
+
 
 function ProcessLogFile
 {
@@ -601,22 +618,39 @@ function AddResult
 function ProcessLogMp
 {
     param ($content, $logResult)
+    Write-Host "Start ProcessLogMp"
+
+    $init = {
+        $file = "C:\Users\Krey_000\AppData\Local\Temp\Stroj3LogMonitor.job.ps1"
+        $sb = [System.Management.Automation.ScriptBlock]::Create((Get-Content $file -Encoding BigEndianUnicode -Raw))
+        Invoke-Command -ScriptBlock $sb -NoNewScope
+    }
+
     $index = 0
     $processed = 0
-
     # First need log string with time
     $isContinue = $true
     do
     {
         $currentResult = ProcessLogBlock -logString ($content[$index]) -logResult $null -first $true
-        if ($currentResult.StartLog -eq [DateTime]::MaxValue) { 
+
+        if (($null -eq $currentResult) -or ($null -eq $currentResult.LinesProcessed) -or ($currentResult.LinesProcessed -eq 0)) {
+            $isContinue = $false
+            Write-Error "Bad processing. Try -ST param. Exiting..."
+            return $null
+        }
+        elseif ($currentResult.StartLog -eq [DateTime]::MaxValue) { 
             $processed++ 
             $index++
         }
         else { $isContinue = $false }
+
         AddResult -summary $logResult -current $currentResult 
     }
     while ($isContinue)
+    Write-Host ("First processed {0}, log start {1}" -f $logResult.LinesProcessed, $logResult.StartLog)
+    Write-Host ("Next run {0} jobs in parallel to process {1} log lines each. If something goes wrong add -ST parameter to command line. It's slower but more reliable." -f [Environment]::ProcessorCount, $content[0].Length)
+    
     ;
 
     $waitList = New-Object System.Collections.Generic.List[int]
@@ -631,8 +665,10 @@ function ProcessLogMp
 
         # add job
         while (($waitList.Count -lt [Environment]::ProcessorCount) -and ($index -lt $content.Count)) {
-            [string[]] $data = $content[$index++]
-            $job = Start-Job -Name "StorjLogMeasure" -InitializationScript $init -ScriptBlock { ProcessLogBlock -logString $args[0] -logResult $null -fromTime $args[1] } -ArgumentList @($data), $logResult.StartLog
+            $datafile = [System.IO.Path]::GetTempFileName()
+             
+            [System.IO.File]::WriteAllLines($datafile, $content[$index++])
+            $job = Start-Job -Name "StorjLogMeasure" -InitializationScript $init -ScriptBlock { ProcessLogBlock -file $args[0] -logResult $null -fromTime $args[1] -ErrorAction Stop } -ArgumentList $datafile, $logResult.StartLog
             $waitList.Add($job.Id)
         }
             
@@ -688,7 +724,9 @@ function ProcessLogFileMp
     Write-Host ("Start parsing...")
     ;
     if ($content.Count -eq 1) { ProcessLogBlock -logString ($content[0])  -logResult $logResult }
-    elseif($content.Count -gt 1) { ProcessLogMp -content $content -logResult $logResult }
+    elseif($content.Count -gt 1) { 
+        ProcessLogMp -content $content -logResult $logResult 
+    }
     else {Write-Error "No content"}
 
     Write-Host ("{0} lines parsed" -f $logResult.LinesProcessed)
@@ -903,8 +941,6 @@ function Preamble{
     Write-Host "mail-to: krey@irinium.ru"
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
-    Write-Host -ForegroundColor Gray "This wallet only for beer. Only beer will be bought from this wallet."
-    Write-Host -ForegroundColor Gray "I will think later how to arrange it in the form of a public contract. Now you have only my promise. Just for lulz."
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
     Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
     Write-Host ""
@@ -965,6 +1001,10 @@ function ProcessFiles
 Preamble
 $logResult = GetResult
 
+#DEBUG
+#$logfile = "C:\----\node01.log"
+#$st = $true
+
 #Process args
 if (-not [String]::IsNullOrEmpty($logfile)) {
     $filesByDate = Get-ChildItem -Path $logfile
@@ -1010,6 +1050,8 @@ else {
     Write-Host
     Write-Host ("End of pipelenie. Process {0} lines, {1} seconds" -f $line, [int]($logResult.EndTime - $logResult.StartTime).TotalSeconds)
 }
+# cd C:\Projects\Repos\Storj
+#.\Storj3LogMeasure\Storj3LogMeasure.ps1 -logFile C:\----\node01.log -ST
 
 
 
