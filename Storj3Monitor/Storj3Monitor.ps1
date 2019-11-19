@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.5.2"
+$v = "0.5.3"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -65,6 +65,9 @@ $v = "0.5.2"
 # v0.5.2   - 20191119
 #               -   add -d param; -d only current day, -d -10 current-10 day, -d 3 last 3 days
 #               -   send mail when last ping restored
+# v0.5.3   - 20191120
+#               -   add nodes count to timeline caption
+
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -797,7 +800,7 @@ function DisplayScore {
 
 function GraphTimeline
 {
-    param ($title, $decription, [int]$height, $bandwidth, $query)
+    param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount)
     if ($height -eq 0) { $height = 10 }
 
     $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
@@ -877,7 +880,7 @@ function GraphTimeline
     Write-Host $title -NoNewline -ForegroundColor Yellow
     if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
     Write-Host
-    Write-Host ("Y-axis from {0} to {1}, cell = {2}" -f (HumanBytes($dataMin)), (HumanBytes($dataMax)), (HumanBytes($rowWidth))) -ForegroundColor Gray
+    Write-Host ("Y-axis from {0} to {1}; cell = {2}; {3} nodes" -f (HumanBytes($dataMin)), (HumanBytes($dataMax)), (HumanBytes($rowWidth)), $nodesCount) -ForegroundColor Gray
     $graph | ForEach-Object {Write-Host $_}
     Write-Host
     Write-Host
@@ -891,7 +894,7 @@ function DisplaySat {
     Write-Host "`ti `t-ingress"
     Write-Host "`te `t-egress"
     Write-Host "`t= `t-pips from all bandwidth"
-    Write-Host "`t- `t-pips from node bandwidth, or simple percent line"
+    Write-Host "`t- `t-pips from bandwidth of maximum node, or simple percent line"
     Write-Host "`t* n `t-down line supressed n times"
     Write-Host
     $now = [System.DateTimeOffset]::Now
@@ -900,14 +903,14 @@ function DisplaySat {
         $sat = $_
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
         $title = ("{0}`t{1}" -f $wellKnownSat[$sat.Name], $sat.Name)
-        GraphTimeline -title $title -bandwidth $bw -query $query
+        GraphTimeline -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count
     }
     Write-Host
 }
 function DisplayTraffic {
     param ($nodes, $query)
     $bw = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
-    GraphTimeline -title "Traffic by days" -height 15 -bandwidth $bw -query $query
+    GraphTimeline -title "Traffic by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count
 }
 
 Preamble
