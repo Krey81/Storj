@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.5.3"
+$v = "0.5.4"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -67,6 +67,8 @@ $v = "0.5.3"
 #               -   send mail when last ping restored
 # v0.5.3   - 20191120
 #               -   add nodes count to timeline caption
+# v0.5.4   - 20191121
+#               -   group nodes by version in nodes summary
 
 
 #TODO-Drink-and-cheers
@@ -212,8 +214,8 @@ function GetJson
     param($uri)
 
     #RAW
-    # ((Invoke-WebRequest -Uri http://localhost:4404/api/dashboard).content | ConvertFrom-Json).data
-    # ((Invoke-WebRequest -Uri http://localhost:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://192.168.156.204:4404/api/dashboard).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://192.168.156.204:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
 
     $resp = Invoke-WebRequest -Uri $uri
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
@@ -747,19 +749,23 @@ function DisplayNodes {
     $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
     $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
 
-    $nodes | Sort-Object Name | Format-Table `
-    @{n="Node"; e={$_.Name}}, `
-    @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
-    @{n="Audit"; e={Round($_.Audit)}}, `
-    @{n="Uptime"; e={Round($_.Uptime)}}, `
-    @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
-    @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
-    @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
-    @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
-    @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
-    @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
-    @{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
-    @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} 
+    $nodes | Group-Object Version | ForEach-Object {
+        Write-Host ("storagenode version {0}:" -f $_.Name)
+        $_.Group | Sort-Object Name | Format-Table `
+        @{n="Node"; e={$_.Name}}, `
+        @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
+        @{n="Audit"; e={Round($_.Audit)}}, `
+        @{n="Uptime"; e={Round($_.Uptime)}}, `
+        @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
+        @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
+        @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
+        @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
+        @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
+        @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
+        @{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
+        @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}}
+
+    }
 
     Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
     Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd} on {5} nodes. Stat time {6:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f 
