@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.5.4"
+$v = "0.6.0"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -69,6 +69,9 @@ $v = "0.5.4"
 #               -   add nodes count to timeline caption
 # v0.5.4   - 20191121
 #               -   group nodes by version in nodes summary
+# v0.6.0   - 20191122
+#               -   compare node version with version.storj.io
+#                   -- Thanks "STORJ Russian Chat" members Sans Kokor to attention and Vladislav Solovei for suggestion.
 
 
 #TODO-Drink-and-cheers
@@ -267,6 +270,20 @@ function GetNodes
     param ($config, $query)
     $result = [System.Collections.Generic.List[PSCustomObject]]@()
     
+    #Start get storj services versions
+    $jobName = "StorjVersionQuery"
+    $address = "version.storj.io"
+    $timeout = 5
+
+    $job = Get-Job -Name $jobName -ErrorAction Ignore | Select-Object -First 1
+    if ($null -eq $job) {
+        Write-Host ("Send version query to {0}" -f $address)
+        Start-Job -Name $jobName -ScriptBlock {(Invoke-WebRequest -Uri $args[0]).Content | ConvertFrom-Json } -ArgumentList $address | Out-Null
+    }
+    elseif ($job.State -eq "Running") { Write-Host "version query still executed" }
+    elseif ($job.State -eq "Completed") { Write-Host "Got version info" }
+    else { Write-Host ("{0} in state {1}" -f $jobName, $job.State) }
+    
     $config.Nodes | ForEach-Object {
         $address = $_
         try {
@@ -279,6 +296,9 @@ function GetNodes
             $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
             $dash | Add-Member -NotePropertyName Uptime -NotePropertyValue $null
             $dash | Add-Member -NotePropertyName LastPingWarningValue -NotePropertyValue 0
+            $dash | Add-Member -NotePropertyName LastVersion -NotePropertyValue $null
+            $dash | Add-Member -NotePropertyName MinimalVersion -NotePropertyValue $null
+            $dash | Add-Member -NotePropertyName LastVerWarningValue -NotePropertyValue $null
 
             $dash.satellites | ForEach-Object {
                 $satid = $_.id
@@ -300,6 +320,37 @@ function GetNodes
         catch {
             Write-Host -ForegroundColor Red ("Node on address {0} fail: {1}" -f $address, $_.Exception.Message )
         }
+    }
+
+    if ($null -eq $job) {
+        #wait 5 seconds
+        Write-Host ("Wait version no more than {0} seconds" -f $timeout)
+        $job = Wait-Job -Name $jobName -Timeout $timeout
+    }
+
+    if (($null -ne $job) -and ($job.State -eq "Completed")) {
+        $satVer = (Receive-Job -Job $job)
+        Remove-Job -Job $job
+        if ($null -ne $satVer) {
+            Write-Host "Set version info"
+            $latest = $satVer.processes.storagenode.suggested.version
+            $minimal = [String]::Join('.', $satVer.Storagenode.major, $satVer.Storagenode.minor, $satVer.Storagenode.patch)
+
+            #DEBUG latest
+            #$latest = "99.0.0"
+
+            #DEBUG oldest
+            #$minimal = "90"
+            #$latest = "90.1"
+
+            Write-Host ("Latest storagenode version is {0}" -f $latest)
+            $result | ForEach-Object { 
+                $_.LastVersion = $latest 
+                $_.MinimalVersion = $minimal 
+            }
+        }
+        else { Write-Host -ForegroundColor Red "Version query completed with no results" }
+    
     }
     return $result
 }
@@ -496,7 +547,7 @@ function CheckNodes{
             $testNode = $_
             $oldVersionStatus = $oldNodes | Where-Object { $_.nodeID -eq $testNode.nodeID } | Select-Object -First 1 -ExpandProperty upToDate
             if ($oldVersionStatus) {
-                Write-Output ("Node {0} is old ({1}.{2}.{3})" -f $testNode.nodeID, $testNode.version.major, $testNode.version.minor, $testNode.version.patch) | Tee-Object -Append -FilePath $body
+                Write-Output ("Node {0} is outdated ({1}.{2}.{3})" -f $testNode.nodeID, $testNode.version.major, $testNode.version.minor, $testNode.version.patch) | Tee-Object -Append -FilePath $body
             }
         }
     }
@@ -529,10 +580,13 @@ function CheckNodes{
 
     #Check last ping
     $newNodes | ForEach-Object {
-        #restore old value
+        #restore old values
         $id = $_.nodeID
         $old = $oldNodes | Where-Object {$_.nodeID -eq $id } | Select-Object -First 1
-        if ($null -ne $old) { $_.LastPingWarningValue = $old.LastPingWarningValue }
+        if ($null -ne $old) { 
+            $_.LastPingWarningValue = $old.LastPingWarningValue 
+            $_.LastVerWarningValue = $old.LastVerWarningValue
+        }
 
         $lostMin = [int](([DateTimeOffset]::Now - $_.lastPinged).TotalMinutes)
         if (($_.LastPingWarningValue -eq 0) -and ($lostMin -ge $config.LastPingWarningMinutes)) {
@@ -543,7 +597,19 @@ function CheckNodes{
             $_.LastPingWarningValue = 0
             Write-Output ("Node {0} last ping back to normal ({1} minutes)" -f $_.Name, $lostMin) | Tee-Object -Append -FilePath $body
         }
+
+        if ($null -ne $_.LastVersion) {
+            if ($_.version -ne $_.LastVersion) {
+                if ($_.LastVerWarningValue -ne $_.LastVersion) {
+                    Write-Output ("Node {0} version {1} may be updated to {2}" -f $_.Name, $_.version, $_.LastVersion ) | Tee-Object -Append -FilePath $body
+                    $_.LastVerWarningValue = $_.LastVersion
+                }
+            }
+        }
     }
+
+    $notLast = $newNodes | Where-Object {$_.LastVersion -ne $_.version }
+
     $oldNodesRef.Value = $newNodes
 }
 
@@ -738,6 +804,22 @@ function DisplayPips {
     param($width, $bandwidth, $name)
 }
 
+function CompareVersion {
+    param ($v1, $v2)
+    try {
+        $v1int = $v1.Split('.') | ForEach-Object {[int]$_}
+        $v2int = $v2.Split('.') | ForEach-Object {[int]$_}
+        for ($i = 0; $i -lt ([Math]::Min($v1int.Length, $v2int.Length)); $i++ ) {
+            if ($v1int[$i] -gt $v2int[$i]) { return 1 }
+            elseif ($v1int[$i] -lt $v2int[$i]) { return -1 }
+        }
+        if ($v1int.Length -gt $v2int.Length) { return 1}
+        elseif ($v2int.Length -gt $v1int.Length) { return -1}
+        else { return 0 }
+    }
+    catch {return 0}
+}
+
 function DisplayNodes {
     param ($nodes, $bwsummary)
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "N O D E S    S U M M A R Y"
@@ -748,9 +830,31 @@ function DisplayNodes {
 
     $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
     $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
+    $latest = $nodes | Where-Object {$null -ne $_.LastVersion } | Select-Object -ExpandProperty LastVersion -First 1
+    $minimal = $nodes | Where-Object {$null -ne $_.MinimalVersion } | Select-Object -ExpandProperty MinimalVersion -First 1
 
     $nodes | Group-Object Version | ForEach-Object {
-        Write-Host ("storagenode version {0}:" -f $_.Name)
+        Write-Host -NoNewline ("storagenode version {0}" -f $_.Name)
+        if ($null -ne $latest) {
+            if ((CompareVersion -v1 $minimal -v2 $latest) -gt 0) { 
+                Write-Host -ForegroundColor Red (" (Something wrong in satellite. Oldest version {0} greater than latest version {1})" -f $minimal, $latest)
+            }
+            elseif ( ($_.Name -eq $latest) -or ((CompareVersion -v1 $_.Name -v2 $latest) -eq 0)) { 
+                Write-Host -ForegroundColor Green " (latest)" 
+            }
+            elseif ((CompareVersion -v1 $_.Name -v2 $latest) -gt 0) { 
+                Write-Host (" (Something wrong in my algorythm or satellite. Node version greater than latest {0})" -f $latest)
+            }
+            elseif ((CompareVersion -v1 $_.Name -v2 $minimal) -ge 0) { 
+                Write-Host -ForegroundColor Yellow (" (not latest but still actual between {0} and {1})" -f $minimal, $latest) 
+            }
+            elseif ((CompareVersion -v1 $_.Name -v2 $minimal) -lt 0) { 
+                Write-Host -ForegroundColor Red (" (obsolete! min {0} max {1} please update quickly)" -f $minimal, $latest) 
+            }
+        else { Write-Host -ForegroundColor Red "Something wrong in version check" }
+        }
+        else { Write-Host }
+
         $_.Group | Sort-Object Name | Format-Table `
         @{n="Node"; e={$_.Name}}, `
         @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
