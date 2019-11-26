@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.0"
+$v = "0.6.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -72,7 +72,13 @@ $v = "0.6.0"
 # v0.6.0   - 20191122
 #               -   compare node version with version.storj.io
 #                   -- Thanks "STORJ Russian Chat" members Sans Kokor to attention and Vladislav Solovei for suggestion.
-
+# v0.6.1   - 20191126
+#               -   Output disqualified field value in Comment
+#               -   Mail when Comment changed
+#               -   Max egress node show in footer
+#               -   Max ingress and egress show below timeline graph
+#               -   Fixes for windows powershell
+#               -   html monospace mails
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -220,7 +226,7 @@ function GetJson
     # ((Invoke-WebRequest -Uri http://192.168.156.204:4404/api/dashboard).content | ConvertFrom-Json).data
     # ((Invoke-WebRequest -Uri http://192.168.156.204:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
 
-    $resp = Invoke-WebRequest -Uri $uri
+    $resp = Invoke-WebRequest -Uri $uri -TimeoutSec 5
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
     $json = ConvertFrom-Json $resp.Content
     if (-not [System.String]::IsNullOrEmpty($json.Error)) { throw $json.Error }
@@ -272,7 +278,7 @@ function GetNodes
     
     #Start get storj services versions
     $jobName = "StorjVersionQuery"
-    $address = "version.storj.io"
+    $address = "https://version.storj.io"
     $timeout = 5
 
     $job = Get-Job -Name $jobName -ErrorAction Ignore | Select-Object -First 1
@@ -304,7 +310,7 @@ function GetNodes
                 $satid = $_.id
                 try {
                     $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
-                    if ($sat.bandwidthDaily.Length -gt 0) { 
+                    if ($sat.bandwidthDaily.Length -gt 0) {
                         if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
                         $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
                     }
@@ -334,7 +340,7 @@ function GetNodes
         if ($null -ne $satVer) {
             Write-Host "Set version info"
             $latest = $satVer.processes.storagenode.suggested.version
-            $minimal = [String]::Join('.', $satVer.Storagenode.major, $satVer.Storagenode.minor, $satVer.Storagenode.patch)
+            $minimal = [String]::Join('.',  $satVer.Storagenode.major.ToString(), $satVer.Storagenode.minor.ToString(), $satVer.Storagenode.patch.ToString())
 
             #DEBUG latest
             #$latest = "99.0.0"
@@ -350,7 +356,6 @@ function GetNodes
             }
         }
         else { Write-Host -ForegroundColor Red "Version query completed with no results" }
-    
     }
     return $result
 }
@@ -450,6 +455,9 @@ function GetScore
         $node = $_
         $node.Sat | Sort-Object id | ForEach-Object {
             $sat = $_
+            $comment = [String]::Empty
+            if ($null -ne $sat.Dq) { $comment = ("disqualified {0}" -f $sat.Dq) }
+    
             New-Object PSCustomObject -Property @{
                 Key = ("{0}-{1}" -f $node.nodeID, $sat.id)
                 NodeId = $node.nodeID
@@ -458,6 +466,7 @@ function GetScore
                 Audit = $sat.audit.score
                 Uptime = $sat.uptime.score
                 Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
+                Comment = $comment
             }
         }
     }
@@ -607,9 +616,6 @@ function CheckNodes{
             }
         }
     }
-
-    $notLast = $newNodes | Where-Object {$_.LastVersion -ne $_.version }
-
     $oldNodesRef.Value = $newNodes
 }
 
@@ -642,6 +648,10 @@ function CheckScore{
                 $oldScore[$idx].Uptime = $new.Uptime
             }
             elseif ($new.Uptime -gt $old.Uptime) { $oldScore[$idx].Uptime = $new.Uptime }
+
+            if ($old.Comment -ne $new.Comment) {
+                Write-Output ("Node {0} update comment: {1}" -f $new.nodeID, $new.Comment) | Tee-Object -Append -FilePath $body
+            }
         }
     }
 }
@@ -675,10 +685,29 @@ function SendMailLinux{
         $body
     )
 
-    ;
     try {
-        $catParam = "'{0}'" -f $body
-        $mailParam = "-s '{0}' {1}" -f $config.Mail.Subj, $config.Mail.To
+        $header = $body + "_header"
+        if (-not [System.IO.File]::Exists($header))
+        {
+            $sb = New-Object System.Text.StringBuilder
+            $sb.AppendLine("<html>") | Out-Null
+            $sb.AppendLine("<body>") | Out-Null
+            $sb.AppendLine("<pre style='font: monospace'>") | Out-Null
+            [System.IO.File]::WriteAllText($header, $sb.ToString())
+        }
+
+        $footer = $body + "_footer"
+        if (-not [System.IO.File]::Exists($footer))
+        {
+            $sb = New-Object System.Text.StringBuilder
+            $sb.AppendLine("</pre>") | Out-Null
+            $sb.AppendLine("</body>") | Out-Null
+            $sb.AppendLine("</html>") | Out-Null
+            [System.IO.File]::WriteAllText($footer, $sb.ToString())
+        }
+        
+        $catParam = "'{0}' '{1}' {2}" -f $header, $body, $footer
+        $mailParam = "--content-type text/html -s '{0}' {1}" -f $config.Mail.Subj, $config.Mail.To
         $bashParam = ('-c "cat {0} | mail {1}"' -f $catParam, $mailParam)
         $output = ExecCommand -path $config.Mail.Path -params $bashParam -out
 
@@ -690,6 +719,18 @@ function SendMailLinux{
     }
 }
 
+function GetMailBody {
+    param($body)
+    $sb = New-Object System.Text.StringBuilder
+    $sb.AppendLine("<html>") | Out-Null
+    $sb.AppendLine("<body>") | Out-Null
+    $sb.AppendLine("<pre style='font: monospace'>") | Out-Null
+    $sb.AppendLine([System.IO.File]::ReadAllText($body)) | Out-Null
+    $sb.AppendLine("</pre>") | Out-Null
+    $sb.AppendLine("</body>") | Out-Null
+    $sb.AppendLine("</html>") | Out-Null
+    return $sb.ToString()
+}
 function SendMailPowershell{
     param(
         $config, 
@@ -711,12 +752,15 @@ function SendMailPowershell{
                 -To ($config.Mail.To) `
                 -From ($config.Mail.From) `
                 -Subject ($config.Mail.Subj) `
-                -Body ([System.IO.File]::ReadAllText($body)) `
+                -Body (GetMailBody -body $body) `
+                -BodyAsHtml `
+                -Encoding utf8 `
                 -UseSsl: $ssl `
                 -SmtpServer ($config.Mail.Smtp) `
                 -Port ($config.Mail.Port) `
                 -Credential $credential `
-                -ErrorAction Stop
+                -ErrorAction Stop 
+                
             
             Write-Host ("Mail sent to {0} via powershell agent" -f $config.Mail.To)
         }
@@ -881,6 +925,9 @@ function DisplayNodes {
         $nodes.Count, 
         [DateTimeOffset]::Now
     )
+
+    $maxNode = $nodes | Sort-Object -Descending {$_.BwSummary.Egress} | Select-Object -First 1
+    Write-Output ("Max egress {0} at {1}" -f (HumanBytes($maxNode.BwSummary.Egress)), $maxNode.Name)
 }
 
 function DisplayScore {
@@ -899,7 +946,7 @@ function DisplayScore {
             'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'Uptime'    = Round($_.Uptime)
-            'Comment'   = [String]::Empty
+            'Comment'   = $_.Comment
         }
         $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
     }
@@ -992,6 +1039,15 @@ function GraphTimeline
     Write-Host
     Write-Host ("Y-axis from {0} to {1}; cell = {2}; {3} nodes" -f (HumanBytes($dataMin)), (HumanBytes($dataMax)), (HumanBytes($rowWidth)), $nodesCount) -ForegroundColor Gray
     $graph | ForEach-Object {Write-Host $_}
+
+    $maxEgress = $timeline.Values | Sort-Object -Descending {$_.Egress} | Select-Object -First 1
+    $maxIngress = $timeline.Values | Sort-Object -Descending {$_.Ingress} | Select-Object -First 1
+    Write-Host (" - max egress {0} ({1:yyyy-MM-dd}), max ingress {2} ({3:yyyy-MM-dd})" -f `
+        (HumanBytes($maxEgress.Egress)), `
+        $maxEgress.To, `
+        (HumanBytes($maxIngress.Ingress)), `
+        $maxIngress.To)
+
     Write-Host
     Write-Host
 }
