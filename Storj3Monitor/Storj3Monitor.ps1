@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.1"
+$v = "0.6.2"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -79,6 +79,12 @@ $v = "0.6.1"
 #               -   Max ingress and egress show below timeline graph
 #               -   Fixes for windows powershell
 #               -   html monospace mails
+# v0.6.2   - 20191128
+#               -   add statellite url
+#               -   add total bandwidth to timeline footer
+#               -   add averages to egress, ingress and bandwidth in timeline footer
+#               -   add -node cmdline parameter for filter output to specific node
+#               -   fix temp file not exists error
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -100,7 +106,7 @@ $v = "0.6.1"
 #
 #
 #   Display only for specefied nodes
-#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress]
+#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress] [-node name]
 #
 #
 #   Test config and mail sender
@@ -294,9 +300,14 @@ function GetNodes
         $address = $_
         try {
             $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address)
+            $name = GetNodeName -config $config -id $dash.nodeID
+            if ($null -ne $query.Node) {
+                if (-not ($name -match $query.Node)) { return }
+            }
+
             FixNode($dash)
             $dash | Add-Member -NotePropertyName Address -NotePropertyValue $address
-            $dash | Add-Member -NotePropertyName Name -NotePropertyValue (GetNodeName -config $config -id $dash.nodeID)
+            $dash | Add-Member -NotePropertyName Name -NotePropertyValue $name
             $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
             $dash | Add-Member -NotePropertyName BwSummary -NotePropertyValue $null
             $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
@@ -314,6 +325,7 @@ function GetNodes
                         if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
                         $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
                     }
+                    $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($_.url)
                     $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($_.disqualified)
                     $dash.Sat.Add($sat)
                 }
@@ -321,6 +333,7 @@ function GetNodes
                     Write-Host -ForegroundColor Red ("Node on address {0} fail sat {1}: {2}" -f $address, $satid, $_.Exception.Message )        
                 }
             }
+            $dash.PSObject.Properties.Remove('satellites')            
             $result.Add($dash)
         }
         catch {
@@ -440,6 +453,7 @@ function AggBandwidth2
             'EgressMax'     = $egressMax
             'Delete'        = $delete
             'DeleteMax'     = $deleteMax
+            'Bandwidth'     = $ingress + $egress
             'From'          = $from
             'To'            = $to
         }
@@ -815,7 +829,7 @@ function Monitor {
             Write-Output ("storj3monitor is alive {0}" -f $config.Canary) | Tee-Object -Append -FilePath $body
             DisplayNodes -nodes $oldNodes >>$body
         }
-        if ((Get-Item -Path $body).Length -gt 0)
+        if (([System.IO.File]::Exists($body)) -and (Get-Item -Path $body).Length -gt 0)
         {
             SendMail -config $config -body $body
             Clear-Content -Path $body
@@ -926,8 +940,14 @@ function DisplayNodes {
         [DateTimeOffset]::Now
     )
 
-    $maxNode = $nodes | Sort-Object -Descending {$_.BwSummary.Egress} | Select-Object -First 1
-    Write-Output ("Max egress {0} at {1}" -f (HumanBytes($maxNode.BwSummary.Egress)), $maxNode.Name)
+    $maxEgress = $nodes | Sort-Object -Descending {$_.BwSummary.Egress} | Select-Object -First 1
+    Write-Output ("- Max egress {0} at {1}" -f (HumanBytes($maxEgress.BwSummary.Egress)), $maxEgress.Name)
+
+    $maxIngress = $nodes | Sort-Object -Descending {$_.BwSummary.Ingress} | Select-Object -First 1
+    Write-Output ("- Max ingress {0} at {1}" -f (HumanBytes($maxIngress.BwSummary.Egress)), $maxIngress.Name)
+
+    $maxBandwidth = $nodes | Sort-Object -Descending {$_.BwSummary.Bandwidth} | Select-Object -First 1
+    Write-Output ("- Max bandwidth {0} at {1}" -f (HumanBytes($maxBandwidth.BwSummary.Bandwidth)), $maxBandwidth.Name)
 }
 
 function DisplayScore {
@@ -1041,12 +1061,25 @@ function GraphTimeline
     $graph | ForEach-Object {Write-Host $_}
 
     $maxEgress = $timeline.Values | Sort-Object -Descending {$_.Egress} | Select-Object -First 1
-    $maxIngress = $timeline.Values | Sort-Object -Descending {$_.Ingress} | Select-Object -First 1
-    Write-Host (" - max egress {0} ({1:yyyy-MM-dd}), max ingress {2} ({3:yyyy-MM-dd})" -f `
+    $avgEgress = ($timeline.Values | Measure-Object -Average Egress).Average
+    Write-Host (" - egress max {0} ({1:yyyy-MM-dd}), average {2}" -f `
         (HumanBytes($maxEgress.Egress)), `
         $maxEgress.To, `
+        (HumanBytes($avgEgress)))
+
+    $maxIngress = $timeline.Values | Sort-Object -Descending {$_.Ingress} | Select-Object -First 1
+    $avgIngress = ($timeline.Values | Measure-Object -Average Ingress).Average
+    Write-Host (" - ingress max {0} ({1:yyyy-MM-dd}), average {2}" -f `
         (HumanBytes($maxIngress.Ingress)), `
-        $maxIngress.To)
+        $maxIngress.To, `
+        (HumanBytes($avgIngress)))
+
+    $maxBandwidth = $timeline.Values | Sort-Object -Descending {$_.TotalBandwidth} | Select-Object -First 1
+    $avgBandwidth = ($timeline.Values | Measure-Object -Average TotalBandwidth).Average
+    Write-Host (" - bandwidth max {0} ({1:yyyy-MM-dd}), average {2}" -f `
+        (HumanBytes($maxBandwidth.TotalBandwidth)), `
+        $maxBandwidth.To, `
+        (HumanBytes($avgBandwidth)))
 
     Write-Host
     Write-Host
@@ -1068,7 +1101,7 @@ function DisplaySat {
         #Write-Host $_.Name
         $sat = $_
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
-        $title = ("{0}`t{1}" -f $wellKnownSat[$sat.Name], $sat.Name)
+        $title = ("{0} ({1})" -f  $sat.Group[0].Url, $sat.Name)
         GraphTimeline -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count
     }
     Write-Host
@@ -1109,10 +1142,15 @@ function GetQuery {
         }
     }
 
+    $node = $null
+    $index = $cmdlineArgs.IndexOf("-node")
+    if ($index -ge 0) { $node = $cmdlineArgs[$index + 1] }
+
     $query = @{
         Ingress = $cmdlineArgs.Contains("ingress")
         Egress = $cmdlineArgs.Contains("egress")
         Days = $days
+        Node = $node
     }
     return $query
 }
