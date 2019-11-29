@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.2"
+$v = "0.6.3"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -85,6 +85,9 @@ $v = "0.6.2"
 #               -   add averages to egress, ingress and bandwidth in timeline footer
 #               -   add -node cmdline parameter for filter output to specific node
 #               -   fix temp file not exists error
+# v0.6.3   - 20191129
+#               -   change output in nodes summary footer
+#               -   fix max ingress value in nodes summary footer, thanks Sans Konor
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -929,22 +932,25 @@ function DisplayNodes {
 
     }
 
+    Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
     Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
-    Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete from {3:yyyy.MM.dd} to {4:yyyy.MM.dd} on {5} nodes. Stat time {6:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f 
+    Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete" -f 
         (HumanBytes($bwsummary.Ingress)), 
         (HumanBytes($bwsummary.Egress)), 
-        (HumanBytes($bwsummary.Delete)), 
+        (HumanBytes($bwsummary.Delete))
+    )
+
+    Write-Output ("from {0:yyyy.MM.dd} to {1:yyyy.MM.dd} on {2} nodes" -f 
         $bwsummary.From, 
         $bwsummary.To, 
-        $nodes.Count, 
-        [DateTimeOffset]::Now
+        $nodes.Count
     )
 
     $maxEgress = $nodes | Sort-Object -Descending {$_.BwSummary.Egress} | Select-Object -First 1
     Write-Output ("- Max egress {0} at {1}" -f (HumanBytes($maxEgress.BwSummary.Egress)), $maxEgress.Name)
 
     $maxIngress = $nodes | Sort-Object -Descending {$_.BwSummary.Ingress} | Select-Object -First 1
-    Write-Output ("- Max ingress {0} at {1}" -f (HumanBytes($maxIngress.BwSummary.Egress)), $maxIngress.Name)
+    Write-Output ("- Max ingress {0} at {1}" -f (HumanBytes($maxIngress.BwSummary.Ingress)), $maxIngress.Name)
 
     $maxBandwidth = $nodes | Sort-Object -Descending {$_.BwSummary.Bandwidth} | Select-Object -First 1
     Write-Output ("- Max bandwidth {0} at {1}" -f (HumanBytes($maxBandwidth.BwSummary.Bandwidth)), $maxBandwidth.Name)
