@@ -92,7 +92,8 @@ $v = "0.6.5"
 #               -   move trafic summary down below satellite details
 #               -   add vetting info in comment field
 # v0.6.5   - 20191130
-#               -   vetting info audit totalcount replaced with successCount
+#               -   vetting info audit. totalCount replaced with successCount
+#               -   fix Now to UtcNow date, bug on month boundary
 
 
 #TODO-Drink-and-cheers
@@ -1109,7 +1110,7 @@ function DisplaySat {
     Write-Host "`t- `t-pips from bandwidth of maximum node, or simple percent line"
     Write-Host "`t* n `t-down line supressed n times"
     Write-Host
-    $now = [System.DateTimeOffset]::Now
+    $now = [System.DateTimeOffset]::UtcNow
     ($nodes | Select-Object -ExpandProperty Sat) | Group-Object id | ForEach-Object {
         #Write-Host $_.Name
         $sat = $_
