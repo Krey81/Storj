@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.3"
+$v = "0.6.5"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -91,6 +91,9 @@ $v = "0.6.3"
 # v0.6.4   - 20191130
 #               -   move trafic summary down below satellite details
 #               -   add vetting info in comment field
+# v0.6.5   - 20191130
+#               -   vetting info audit totalcount replaced with successCount
+
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -477,7 +480,7 @@ function GetScore
             $sat = $_
             $comment = @()
             if ($null -ne $sat.Dq) { $comment += ("disqualified {0}" -f $sat.Dq) }
-            if ($sat.audit.totalCount -lt 100) { $comment += ("vetting {0}" -f $sat.audit.totalCount) }
+            if ($sat.audit.successCount -lt 100) { $comment += ("vetting {0}" -f $sat.audit.successCount) }
     
             New-Object PSCustomObject -Property @{
                 Key = ("{0}-{1}" -f $node.nodeID, $sat.id)
@@ -1131,7 +1134,7 @@ if ($args.Contains("example")) {
 
 $config = LoadConfig -cmdlineArgs $args
 #DEBUG
-#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
 
 if (-not $config) { return }
 
