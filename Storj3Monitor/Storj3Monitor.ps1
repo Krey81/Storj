@@ -1134,7 +1134,7 @@ if ($args.Contains("example")) {
 
 $config = LoadConfig -cmdlineArgs $args
 #DEBUG
-$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
 
 if (-not $config) { return }
 
