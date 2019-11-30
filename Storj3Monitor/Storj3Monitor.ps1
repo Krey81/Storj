@@ -88,6 +88,9 @@ $v = "0.6.3"
 # v0.6.3   - 20191129
 #               -   change output in nodes summary footer
 #               -   fix max ingress value in nodes summary footer, thanks Sans Konor
+# v0.6.4   - 20191130
+#               -   move trafic summary down below satellite details
+#               -   add vetting info in comment field
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -472,8 +475,9 @@ function GetScore
         $node = $_
         $node.Sat | Sort-Object id | ForEach-Object {
             $sat = $_
-            $comment = [String]::Empty
-            if ($null -ne $sat.Dq) { $comment = ("disqualified {0}" -f $sat.Dq) }
+            $comment = @()
+            if ($null -ne $sat.Dq) { $comment += ("disqualified {0}" -f $sat.Dq) }
+            if ($sat.audit.totalCount -lt 100) { $comment += ("vetting {0}" -f $sat.audit.totalCount) }
     
             New-Object PSCustomObject -Property @{
                 Key = ("{0}-{1}" -f $node.nodeID, $sat.id)
@@ -483,7 +487,7 @@ function GetScore
                 Audit = $sat.audit.score
                 Uptime = $sat.uptime.score
                 Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
-                Comment = $comment
+                Comment = "- " + [String]::Join("; ", $comment)
             }
         }
     }
@@ -1184,9 +1188,13 @@ elseif ($args.Contains("testmail")) {
 elseif ($nodes.Count -gt 0) {
     if ($null -eq $query.Days -or $query.Days -gt 0) {
         DisplaySat -nodes $nodes -query $query
+        DisplayScore -score $score -bwsummary $bwsummary
         DisplayTraffic -nodes $nodes -query $query
     }
-    DisplayScore -score $score -bwsummary $bwsummary
+    else 
+    {
+        DisplayScore -score $score -bwsummary $bwsummary
+    }
     DisplayNodes -nodes $nodes -bwsummary $bwsummary
 }
 
