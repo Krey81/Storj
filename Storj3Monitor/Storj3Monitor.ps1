@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.5"
+$v = "0.6.6"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -94,6 +94,13 @@ $v = "0.6.5"
 # v0.6.5   - 20191130
 #               -   vetting info audit. totalCount replaced with successCount
 #               -   fix Now to UtcNow date, bug on month boundary
+# v0.6.6   - 20191204
+#               -   fix comment monitoring cause mail storm
+#               -   add MonitorFullComment option
+#               -   fix mail text cliping in linux
+#               -   show node name in mails instead of id
+#               -   add HideNodeId config option
+#               -   add satellite details to canopy warning
 
 
 #TODO-Drink-and-cheers
@@ -171,6 +178,8 @@ function DefaultConfig{
         Nodes = "127.0.0.1:14002"
         WaitSeconds = 300
         Threshold = 0.2
+        MonitorFullComment = $false
+        HideNodeId = $false
         Mail = @{
             MailAgent = "none"
         }
@@ -231,6 +240,13 @@ function LoadConfig{
         $config | Add-Member -NotePropertyName LastPingWarningMinutes -NotePropertyValue 30
     }
 
+    if ($null -eq $config.MonitorFullComment) { 
+        $config | Add-Member -NotePropertyName MonitorFullComment -NotePropertyValue $false
+    }
+
+    if ($null -eq $config.HideNodeId) { 
+        $config | Add-Member -NotePropertyName HideNodeId -NotePropertyValue $false
+    }
     return $config
 }
 
@@ -335,6 +351,7 @@ function GetNodes
                         if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
                         $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
                     }
+                    $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $_.id -url $_.url)
                     $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($_.url)
                     $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($_.disqualified)
                     $dash.Sat.Add($sat)
@@ -479,8 +496,10 @@ function GetScore
         $node = $_
         $node.Sat | Sort-Object id | ForEach-Object {
             $sat = $_
+            $commentMonitored = @()
+            if ($null -ne $sat.Dq) { $commentMonitored += ("disqualified {0}" -f $sat.Dq) }
+
             $comment = @()
-            if ($null -ne $sat.Dq) { $comment += ("disqualified {0}" -f $sat.Dq) }
             if ($sat.audit.successCount -lt 100) { $comment += ("vetting {0}" -f $sat.audit.successCount) }
     
             New-Object PSCustomObject -Property @{
@@ -488,10 +507,12 @@ function GetScore
                 NodeId = $node.nodeID
                 NodeName = $node.Name
                 SatelliteId = $sat.id
+                SatelliteName = $sat.Name
                 Audit = $sat.audit.score
                 Uptime = $sat.uptime.score
                 Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
-                Comment = "- " + [String]::Join("; ", $comment)
+                CommentMonitored = [String]::Join("; ", $commentMonitored)
+                Comment = [String]::Join("; ", $comment)
             }
         }
     }
@@ -518,7 +539,20 @@ function GetNodeName{
     param ($config, $id)
     $name = $config.WellKnownNodes."$id"
     if ($null -eq $name) { $name = Compact($id) }
-    else {$name+= " (" + (Compact($id)) + ")"}
+    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
+    return $name
+}
+function GetSatName{
+    param ($config, $id, $url)
+
+    $name = $wellKnownSat[$id] 
+    if ($null -eq $name) {
+        $point = $url.IndexOf(":")
+        if ($point -gt 0) { $name = $url.Substring(0, $point) }
+    }
+    
+    if ($null -eq $name) { $name = Compact($id) }
+    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
     return $name
 }
 
@@ -554,11 +588,10 @@ function CheckNodes{
     param(
         $config, 
         $body,
+        $newNodes,
         [ref]$oldNodesRef
     )
     $oldNodes = $oldNodesRef.Value
-    ;
-    $newNodes = GetNodes -config $config
 
     #DEBUG drop some satellites and reset update
     #$newNodes = $newNodes | Select-Object -First 2
@@ -648,10 +681,9 @@ function CheckScore{
     param(
         $config, 
         $body,
-        $nodes,
-        $oldScore
+        $oldScore,
+        $newScore
     )
-    $newScore = GetScore -nodes $nodes
 
     #DEBUG drop scores
     #$newScore[0].Audit = 0.2
@@ -663,19 +695,25 @@ function CheckScore{
         if ($null -ne $old){
             $idx = $oldScore.IndexOf($old)
             if ($old.Audit -ge ($new.Audit + $config.Threshold)) {
-                Write-Output ("Node {0} down audit from {1} to {2} on {3}" -f $new.nodeID, $old.Audit, $new.Audit, $new.SatelliteId) | Tee-Object -Append -FilePath $body
+                Write-Output ("Node {0} down audit from {1} to {2} on {3}" -f $new.NodeName, $old.Audit, $new.Audit, $new.SatelliteId) | Tee-Object -Append -FilePath $body
                 $oldScore[$idx].Audit = $new.Audit
             }
             elseif ($new.Audit -gt $old.Audit) { $oldScore[$idx].Audit = $new.Audit }
 
             if ($old.Uptime -ge ($new.Uptime + $config.Threshold)) {
-                Write-Output ("Node {0} down uptime from {1} to {2} on {3}" -f $new.nodeID, $old.Uptime, $new.Uptime, $new.SatelliteId) | Tee-Object -Append -FilePath $body
+                Write-Output ("Node {0} down uptime from {1} to {2} on {3}" -f $new.NodeName, $old.Uptime, $new.Uptime, $new.SatelliteId) | Tee-Object -Append -FilePath $body
                 $oldScore[$idx].Uptime = $new.Uptime
             }
             elseif ($new.Uptime -gt $old.Uptime) { $oldScore[$idx].Uptime = $new.Uptime }
 
-            if ($old.Comment -ne $new.Comment) {
-                Write-Output ("Node {0} update comment: {1}" -f $new.nodeID, $new.Comment) | Tee-Object -Append -FilePath $body
+            if ($old.CommentMonitored -ne $new.CommentMonitored) {
+                Write-Output ("Node {0} update comment for {1} to {2}. Old was {3}" -f $new.NodeName, $new.SatelliteName, $new.CommentMonitored, $old.CommentMonitored) | Tee-Object -Append -FilePath $body
+                $oldScore[$idx].CommentMonitored = $new.CommentMonitored
+            }
+
+            if ($config.MonitorFullComment -and ($old.Comment -ne $new.Comment)) {
+                Write-Output ("Node {0} update comment for {1} to {2}. Old was {3}" -f $new.NodeName, $new.SatelliteName, $new.Comment, $old.Comment) | Tee-Object -Append -FilePath $body
+                $oldScore[$idx].Comment = $new.Comment
             }
         }
     }
@@ -717,7 +755,7 @@ function SendMailLinux{
             $sb = New-Object System.Text.StringBuilder
             $sb.AppendLine("<html>") | Out-Null
             $sb.AppendLine("<body>") | Out-Null
-            $sb.AppendLine("<pre style='font: monospace'>") | Out-Null
+            $sb.AppendLine("<pre style='font: monospace; white-space: pre;'>") | Out-Null
             [System.IO.File]::WriteAllText($header, $sb.ToString())
         }
 
@@ -732,7 +770,7 @@ function SendMailLinux{
         }
         
         $catParam = "'{0}' '{1}' {2}" -f $header, $body, $footer
-        $mailParam = "--content-type text/html -s '{0}' {1}" -f $config.Mail.Subj, $config.Mail.To
+        $mailParam = "--mime --content-type text/html -s '{0}' {1}" -f $config.Mail.Subj, $config.Mail.To
         $bashParam = ('-c "cat {0} | mail {1}"' -f $catParam, $mailParam)
         $output = ExecCommand -path $config.Mail.Path -params $bashParam -out
 
@@ -749,7 +787,7 @@ function GetMailBody {
     $sb = New-Object System.Text.StringBuilder
     $sb.AppendLine("<html>") | Out-Null
     $sb.AppendLine("<body>") | Out-Null
-    $sb.AppendLine("<pre style='font: monospace'>") | Out-Null
+    $sb.AppendLine("<pre style='font: monospace; white-space: pre;'>") | Out-Null
     $sb.AppendLine([System.IO.File]::ReadAllText($body)) | Out-Null
     $sb.AppendLine("</pre>") | Out-Null
     $sb.AppendLine("</body>") | Out-Null
@@ -830,15 +868,19 @@ function Monitor {
 
     while ($true) {
         Start-Sleep -Seconds $config.WaitSeconds
-        CheckNodes -config $config -body $body -oldNodesRef ([ref]$oldNodes)
-        CheckScore -config $config -body $body -nodes $oldNodes -oldScore $oldScore
+        $newNodes = GetNodes -config $config
+        $newScore = GetScore -nodes $newNodes
+        CheckNodes -config $config -body $body -newNodes $newNodes -oldNodesRef ([ref]$oldNodes)
+        CheckScore -config $config -body $body -oldScore $oldScore -newScore $newScore
 
         # Canopy warning
         #DEBUG check hour, must be 10
         if (($null -eq $config.Canary) -or ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -ge 10)) {
             $config.Canary = [System.DateTimeOffset]::Now
             Write-Output ("storj3monitor is alive {0}" -f $config.Canary) | Tee-Object -Append -FilePath $body
-            DisplayNodes -nodes $oldNodes >>$body
+            $bwsummary = ($newNodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+            DisplayScore -score $newScore -bwsummary $bwsummary >> $body
+            DisplayNodes -nodes $newNodes -bwsummary $bwsummary >> $body
         }
         if (([System.IO.File]::Exists($body)) -and (Get-Item -Path $body).Length -gt 0)
         {
@@ -924,7 +966,7 @@ function DisplayNodes {
         }
         else { Write-Host }
 
-        $_.Group | Sort-Object Name | Format-Table `
+        $_.Group | Sort-Object Name | Format-Table -AutoSize `
         @{n="Node"; e={$_.Name}}, `
         @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
         @{n="Audit"; e={Round($_.Audit)}}, `
@@ -936,8 +978,8 @@ function DisplayNodes {
         @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
         @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
         @{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
-        @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}}
-
+        @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} `
+        | Out-String -Width 200
     }
 
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
@@ -972,19 +1014,24 @@ function DisplayScore {
 
     $tab = [System.Collections.Generic.List[PSCustomObject]]@()
     $score | Sort-Object SatelliteId, NodeName | ForEach-Object {
+
+        $comment = @() 
+        if (-not [String]::IsNullOrEmpty($_.CommentMonitored)) { $comment += $_.CommentMonitored}
+        if (-not [String]::IsNullOrEmpty($_.Comment)) { $comment += $_.Comment}
+
         $p = @{
-            'Satellite' = ("{0} ({1})" -f $wellKnownSat[$_.SatelliteId], (Compact($_.SatelliteId)))
+            'Satellite' = $_.SatelliteName
             'Node'      = $_.NodeName
             'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
             'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
             'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'Uptime'    = Round($_.Uptime)
-            'Comment'   = $_.Comment
+            'Comment'   = "- " + [String]::Join("; ", $comment)
         }
         $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
     }
-    $tab.GetEnumerator() | Format-Table Satellite, Node, Ingress, Egress, Delete, Audit, Uptime, Comment
+    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Delete, Audit, Uptime, Comment | Out-String -Width 200
 
     Write-Host
 }
