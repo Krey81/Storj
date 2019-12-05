@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.6"
+$v = "0.6.7"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -101,6 +101,10 @@ $v = "0.6.6"
 #               -   show node name in mails instead of id
 #               -   add HideNodeId config option
 #               -   add satellite details to canopy warning
+# v0.6.7   - 20191205
+#               -   IMPORTANT - fix incorrect supressing graph lines (* N). Not only bottom lines was supressed before fix. Incorrect graphs.
+#               -   Add repair graphs and counters
+#               -   Add config option DisplayRepairOption, by default repairs show totals and "by days" graph
 
 
 #TODO-Drink-and-cheers
@@ -150,7 +154,18 @@ $wellKnownSat = @{
     "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1"
 }
 
+$repairOptionValues = @(
+    "none", 
+    "totals", 
+    "traffic", 
+    "sat"
+)
 
+function CheckRepairDisplay{
+    param($config, $where)
+    return ($repairOptionValues.IndexOf($config.DisplayRepairOption) -ge $repairOptionValues.IndexOf($where))
+}
+    
 function IsAnniversaryVersion {
     param($vstr)
     $standardBootleVolumeLitters = 0.5
@@ -173,20 +188,6 @@ function IsAnniversaryVersion {
     Write-Host ""
 }
 
-function DefaultConfig{
-    $config = @{
-        Nodes = "127.0.0.1:14002"
-        WaitSeconds = 300
-        Threshold = 0.2
-        MonitorFullComment = $false
-        HideNodeId = $false
-        Mail = @{
-            MailAgent = "none"
-        }
-    }
-    return $config
-}
-
 function GetFullPath($file)
 {
     # full path
@@ -206,6 +207,21 @@ function GetFullPath($file)
     if ([System.IO.File]::Exists($file4)) { return $file4 }
 
     return $null
+}
+
+function DefaultConfig{
+    $config = @{
+        Nodes = "127.0.0.1:14002"
+        WaitSeconds = 300
+        Threshold = 0.2
+        MonitorFullComment = $false
+        HideNodeId = $false
+        DisplayRepairOption = "traffic"
+        Mail = @{
+            MailAgent = "none"
+        }
+    }
+    return $config
 }
 
 function LoadConfig{
@@ -247,6 +263,14 @@ function LoadConfig{
     if ($null -eq $config.HideNodeId) { 
         $config | Add-Member -NotePropertyName HideNodeId -NotePropertyValue $false
     }
+
+    if ($null -eq $config.DisplayRepairOption) { 
+        $config | Add-Member -NotePropertyName DisplayRepairOption -NotePropertyValue "traffic"
+    }
+    elseif ($repairOptionValues -notcontains $config.DisplayRepairOption) {
+        throw ("Bad DisplayRepairOption value in config")
+    }
+
     return $config
 }
 
@@ -411,6 +435,8 @@ function AggBandwidth
         [long]$ingress = 0
         [long]$egress = 0
         [long]$delete = 0
+        [long]$repairIngress = 0
+        [long]$repairEgress = 0
         $from = $null
         $to = $null
     }
@@ -418,6 +444,8 @@ function AggBandwidth
         $ingress+=$item.ingress.usage
         $egress+= $item.egress.usage
         $delete+= $item.delete
+        $repairIngress+=$item.ingress.repair
+        $repairEgress+=$item.egress.repair
 
         if ($null -eq $from) { $from = $item.intervalStart}
         elseif ($item.intervalStart -lt $from) { $from = $item.intervalStart}
@@ -432,8 +460,31 @@ function AggBandwidth
             'TotalBandwidth'= $ingress + $egress
             'MaxBandwidth'= [Math]::Max($ingress, $egress)
             'Delete'   = $delete
+            'RepairIngress' = $repairIngress
+            'RepairEgress' = $repairEgress
+            'MaxRepairBandwidth'= [Math]::Max($repairIngress, $repairEgress)
             'From'     = $from
             'To'       = $to
+        }
+        Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
+    }
+}
+
+function ConvertRepair
+{
+    [CmdletBinding()]
+    Param(
+          [Parameter(ValueFromPipeline)]
+          $item
+    )
+    process {
+        $p = @{
+            'Ingress'  = $item.RepairIngress
+            'Egress'   = $item.RepairEgress
+            'TotalBandwidth'= $item.RepairIngress + $item.RepairEgress
+            'MaxBandwidth'= $item.MaxRepairBandwidth
+            'From'     = $item.From
+            'To'       = $item.To
         }
         Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
     }
@@ -453,6 +504,8 @@ function AggBandwidth2
         $egressMax = 0
         $delete = 0
         $deleteMax = 0
+        $repairEgress = 0
+        $repairIngress = 0
         $from = $null
         $to = $null
     }
@@ -465,6 +518,9 @@ function AggBandwidth2
 
         $delete+= $item.Delete
         if ($item.Delete -gt $deleteMax) { $deleteMax = $item.Delete }
+
+        $repairEgress+=$item.RepairEgress
+        $repairIngress+=$item.RepairIngress
 
         if ($null -eq $from) { $from = $item.From}
         elseif ($item.From -lt $from) { $from = $item.From}
@@ -480,6 +536,8 @@ function AggBandwidth2
             'EgressMax'     = $egressMax
             'Delete'        = $delete
             'DeleteMax'     = $deleteMax
+            'RepairEgress'  = $repairEgress
+            'RepairIngress' = $repairIngress
             'Bandwidth'     = $ingress + $egress
             'From'          = $from
             'To'            = $to
@@ -880,7 +938,7 @@ function Monitor {
             Write-Output ("storj3monitor is alive {0}" -f $config.Canary) | Tee-Object -Append -FilePath $body
             $bwsummary = ($newNodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
             DisplayScore -score $newScore -bwsummary $bwsummary >> $body
-            DisplayNodes -nodes $newNodes -bwsummary $bwsummary >> $body
+            DisplayNodes -nodes $newNodes -bwsummary $bwsummary -config $config >> $body
         }
         if (([System.IO.File]::Exists($body)) -and (Get-Item -Path $body).Length -gt 0)
         {
@@ -932,7 +990,7 @@ function CompareVersion {
 }
 
 function DisplayNodes {
-    param ($nodes, $bwsummary)
+    param ($nodes, $bwsummary, $config)
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "N O D E S    S U M M A R Y"
 
     if ($null -eq $bwsummary) {
@@ -984,10 +1042,27 @@ function DisplayNodes {
 
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
     Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
-    Write-Output ("Total bandwidth {0} Ingress, {1} Egress, {2} Delete" -f 
-        (HumanBytes($bwsummary.Ingress)), 
+
+    if (CheckRepairDisplay -config $config -where "totals") {
+        Write-Output ("Total repair {0} Egress, {1} Ingress" -f 
+            (HumanBytes($bwsummary.RepairEgress)), 
+            (HumanBytes($bwsummary.RepairIngress))
+        )
+    }
+
+    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
+        (HumanBytes($bwsummary.Egress + $bwsummary.Ingress)), 
         (HumanBytes($bwsummary.Egress)), 
+        (HumanBytes($bwsummary.Ingress)), 
         (HumanBytes($bwsummary.Delete))
+    )
+
+    $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart -eq [DateTimeOffset]::UtcNow.Date} | AggBandwidth 
+    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
+        (HumanBytes($today.Egress + $today.Ingress)), 
+        (HumanBytes($today.Egress)), 
+        (HumanBytes($today.Ingress)), 
+        (HumanBytes($today.Delete))
     )
 
     Write-Output ("from {0:yyyy.MM.dd} to {1:yyyy.MM.dd} on {2} nodes" -f 
@@ -1036,14 +1111,28 @@ function DisplayScore {
     Write-Host
 }
 
-function GraphTimeline
+function GraphTimelineDirect
 {
     param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount)
-    if ($height -eq 0) { $height = 10 }
-
     $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
     $timeline = New-Object "System.Collections.Generic.SortedList[int, PSCustomObject]"
     $bd | ForEach-Object { $timeline.Add([Int]::Parse($_.Name), ($_.Group | AggBandwidth)) }
+    GraphTimeline -title $title -decription $decription -height $height -timeline $timeline -query $query -nodesCount $nodesCount
+}
+
+function GraphTimelineRepair
+{
+    param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount)
+    $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
+    $timeline = New-Object "System.Collections.Generic.SortedList[int, PSCustomObject]"
+    $bd | ForEach-Object { $timeline.Add([Int]::Parse($_.Name), ($_.Group | AggBandwidth | ConvertRepair)) }
+    GraphTimeline -title $title -decription $decription -height $height -timeline $timeline -query $query -nodesCount $nodesCount
+}
+
+function GraphTimeline
+{
+    param ($title, $decription, [int]$height, $timeline, $query, $nodesCount)
+    if ($height -eq 0) { $height = 10 }
 
     #max in groups while min in original data. otherwise min was zero in empty data cells
     $firstCol = ($timeline.Keys | Measure-Object -Minimum).Minimum
@@ -1087,7 +1176,7 @@ function GraphTimeline
                 $hi = ($agg.Ingress - $dataMin) / $rowWidth
                 $he = ($agg.Egress - $dataMin) / $rowWidth
                 if (-not ($query.Ingress -xor $query.Egress)) {
-                    if ($hi -ge $r -and $he -ge $r) { $line+="ie " }
+                    if (($hi -ge $r) -and ($he -ge $r)) { $line+="ie " }
                     elseif ($hi -ge $r) { $line+="i  " }
                     elseif ($he -ge $r) { $line+=" e " }
                 }
@@ -1098,18 +1187,20 @@ function GraphTimeline
             }
             else {$line+=$fill1}
         }
-        if (($null -eq $first) -or ($line -ne $first)) { 
+        
+        if ($null -eq $first) { 
             $graph.Add($line) 
             #allow skips only for full month
             if ($null -eq $query.Days) { $first = $line }
         }
-        elseif (($null -ne $first) -and ($line -eq $first)) { $skip++ }
-        elseif (($null -ne $first) -and ($line -ne $first)) { 
-            $graph.Add($line)
-            $first = "xxx"
+        elseif ($null -ne $first)
+        {
+            if ($line -eq $first) { $skip++ }
+            else {
+                $graph.Add($line)
+                $first = "xxx"
+            }
         }
-
-        #else {$skip++}
     }
     if ($skip -gt 0) { $graph[1] = $graph[1] + " * " + $skip.ToString() }
     $graph.Reverse()
@@ -1142,12 +1233,16 @@ function GraphTimeline
         $maxBandwidth.To, `
         (HumanBytes($avgBandwidth)))
 
+    $totalEgress = ($timeline.Values | Measure-Object -Sum {$_.Egress}).Sum
+    $totalIngress = ($timeline.Values | Measure-Object -Sum {$_.Ingress}).Sum
+    Write-Host (" - bandwidth total {0} egress, {1} ingress" -f (HumanBytes($totalEgress)), (HumanBytes($totalIngress)))
+    
     Write-Host
     Write-Host
 }
 
 function DisplaySat {
-    param ($nodes, $bw, $query)
+    param ($nodes, $bw, $query, $config)
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
     Write-Host "Legenda:"
@@ -1163,14 +1258,22 @@ function DisplaySat {
         $sat = $_
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
         $title = ("{0} ({1})" -f  $sat.Group[0].Url, $sat.Name)
-        GraphTimeline -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count
+        if (CheckRepairDisplay -config $config -where "sat") {
+            GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count
+        }
+        GraphTimelineDirect -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count
     }
     Write-Host
 }
 function DisplayTraffic {
-    param ($nodes, $query)
+    param ($nodes, $query, $config)
     $bw = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
-    GraphTimeline -title "Traffic by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count
+    if (CheckRepairDisplay -config $config -where "traffic") {
+        GraphTimelineRepair -title "Repair by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count
+    }
+    GraphTimelineDirect -title "Traffic by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count
+    
+
 }
 
 Preamble
@@ -1238,15 +1341,15 @@ elseif ($args.Contains("testmail")) {
 }
 elseif ($nodes.Count -gt 0) {
     if ($null -eq $query.Days -or $query.Days -gt 0) {
-        DisplaySat -nodes $nodes -query $query
+        DisplaySat -nodes $nodes -query $query -config $config
         DisplayScore -score $score -bwsummary $bwsummary
-        DisplayTraffic -nodes $nodes -query $query
+        DisplayTraffic -nodes $nodes -query $query -config $config
     }
     else 
     {
         DisplayScore -score $score -bwsummary $bwsummary
     }
-    DisplayNodes -nodes $nodes -bwsummary $bwsummary
+    DisplayNodes -nodes $nodes -bwsummary $bwsummary -config $config
 }
 
 #DEBUG
