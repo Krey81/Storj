@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.8"
+$v = "0.6.9"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -108,6 +108,9 @@ $v = "0.6.8"
 #               -   Add config option DisplayRepairOption, by default repairs show totals and "by days" graph
 # v0.6.8   - 20191205
 #               -   fix powershell 5.0 issues
+# v0.6.9   - 20191205
+#               -   zero base graphs by default
+#               -   config option GraphStart [zero, minbandwidth]
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -161,6 +164,11 @@ $repairOptionValues = @(
     "totals", 
     "traffic", 
     "sat"
+)
+
+$graphStartOptionValues = @(
+    "zero", 
+    "minbandwidth"
 )
 
 function CheckRepairDisplay{
@@ -221,6 +229,7 @@ function DefaultConfig{
         MonitorFullComment = $false
         HideNodeId = $false
         DisplayRepairOption = "traffic"
+        GraphStart = "zero"
         Mail = @{
             MailAgent = "none"
         }
@@ -273,6 +282,13 @@ function LoadConfig{
     }
     elseif ($repairOptionValues -notcontains $config.DisplayRepairOption) {
         throw ("Bad DisplayRepairOption value in config")
+    }
+
+    if ($null -eq $config.GraphStart) { 
+        $config | Add-Member -NotePropertyName GraphStart -NotePropertyValue "zero"
+    }
+    elseif ($graphStartOptionValues -notcontains $config.GraphStart) {
+        throw ("Bad GraphStart value in config")
     }
 
     return $config
@@ -1118,31 +1134,37 @@ function DisplayScore {
 
 function GraphTimelineDirect
 {
-    param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount)
+    param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount, $config)
     $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
     $timeline = New-Object "System.Collections.Generic.SortedList[int, PSCustomObject]"
     $bd | ForEach-Object { $timeline.Add([Int]::Parse($_.Name), ($_.Group | AggBandwidth)) }
-    GraphTimeline -title $title -decription $decription -height $height -timeline $timeline -query $query -nodesCount $nodesCount
+    GraphTimeline -title $title -decription $decription -height $height -timeline $timeline -query $query -nodesCount $nodesCount -config $config
 }
 
 function GraphTimelineRepair
 {
-    param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount)
+    param ($title, $decription, [int]$height, $bandwidth, $query, $nodesCount, $config)
     $bd = $bandwidth | Group-Object {$_.intervalStart.Day}
     $timeline = New-Object "System.Collections.Generic.SortedList[int, PSCustomObject]"
     $bd | ForEach-Object { $timeline.Add([Int]::Parse($_.Name), ($_.Group | AggBandwidth | ConvertRepair)) }
-    GraphTimeline -title $title -decription $decription -height $height -timeline $timeline -query $query -nodesCount $nodesCount
+    GraphTimeline -title $title -decription $decription -height $height -timeline $timeline -query $query -nodesCount $nodesCount -config $config
 }
 
 function GraphTimeline
 {
-    param ($title, $decription, [int]$height, $timeline, $query, $nodesCount)
+    param ($title, $decription, [int]$height, $timeline, $query, $nodesCount, $config)
     if ($height -eq 0) { $height = 10 }
 
     #max in groups while min in original data. otherwise min was zero in empty data cells
     $firstCol = ($timeline.Keys | Measure-Object -Minimum).Minimum
     $lastCol = ($timeline.Keys | Measure-Object -Maximum).Maximum
-    $dataMin = ($timeline.Values | Measure-Object -Minimum -Property MaxBandwidth).Minimum
+    
+    #data bounds
+    if ($config.GraphStart -eq "zero") {$dataMin = 0}
+    elseif ($config.GraphStart -eq "minbandwidth") {
+        $dataMin = ($timeline.Values | Measure-Object -Minimum -Property MaxBandwidth).Minimum
+    }
+    else {throw "Bad graph start config value"}
     $dataMax = ($timeline.Values | Measure-Object -Maximum -Property MaxBandwidth).Maximum
 
     if (($null -eq $dataMax) -or ($dataMax -eq 0)) { 
@@ -1264,9 +1286,9 @@ function DisplaySat {
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
         $title = ("{0} ({1})" -f  $sat.Group[0].Url, $sat.Name)
         if (CheckRepairDisplay -config $config -where "sat") {
-            GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count
+            GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
         }
-        GraphTimelineDirect -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count
+        GraphTimelineDirect -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
     }
     Write-Host
 }
@@ -1274,9 +1296,9 @@ function DisplayTraffic {
     param ($nodes, $query, $config)
     $bw = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
     if (CheckRepairDisplay -config $config -where "traffic") {
-        GraphTimelineRepair -title "Repair by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count
+        GraphTimelineRepair -title "Repair by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
     }
-    GraphTimelineDirect -title "Traffic by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count
+    GraphTimelineDirect -title "Traffic by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
     
 
 }
