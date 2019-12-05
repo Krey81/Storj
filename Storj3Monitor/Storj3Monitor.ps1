@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.7"
+$v = "0.6.8"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -103,9 +103,11 @@ $v = "0.6.7"
 #               -   add satellite details to canopy warning
 # v0.6.7   - 20191205
 #               -   IMPORTANT - fix incorrect supressing graph lines (* N). Not only bottom lines was supressed before fix. Incorrect graphs.
+#                   - thanks again to Sans Konor
 #               -   Add repair graphs and counters
 #               -   Add config option DisplayRepairOption, by default repairs show totals and "by days" graph
-
+# v0.6.8   - 20191205
+#               -   fix powershell 5.0 issues
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -185,6 +187,8 @@ function IsAnniversaryVersion {
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
     Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
+    Write-Host ""
+    Write-Host "Thanks Sans Konor for bug hunting"
     Write-Host ""
 }
 
@@ -373,6 +377,7 @@ function GetNodes
                     $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
                     if ($sat.bandwidthDaily.Length -gt 0) {
                         if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
+                        elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
                         $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
                     }
                     $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $_.id -url $_.url)
@@ -1057,7 +1062,7 @@ function DisplayNodes {
         (HumanBytes($bwsummary.Delete))
     )
 
-    $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart -eq [DateTimeOffset]::UtcNow.Date} | AggBandwidth 
+    $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart.UtcDateTime.Date -eq [DateTimeOffset]::UtcNow.UtcDateTime.Date} | AggBandwidth 
     Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
         (HumanBytes($today.Egress + $today.Ingress)), 
         (HumanBytes($today.Egress)), 
@@ -1233,8 +1238,8 @@ function GraphTimeline
         $maxBandwidth.To, `
         (HumanBytes($avgBandwidth)))
 
-    $totalEgress = ($timeline.Values | Measure-Object -Sum {$_.Egress}).Sum
-    $totalIngress = ($timeline.Values | Measure-Object -Sum {$_.Ingress}).Sum
+    $totalEgress = ($timeline.Values | Measure-Object -Sum Egress).Sum
+    $totalIngress = ($timeline.Values | Measure-Object -Sum Ingress).Sum
     Write-Host (" - bandwidth total {0} egress, {1} ingress" -f (HumanBytes($totalEgress)), (HumanBytes($totalIngress)))
     
     Write-Host
