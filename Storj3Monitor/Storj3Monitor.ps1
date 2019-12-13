@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.6.9"
+$v = "0.7.0"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -111,6 +111,8 @@ $v = "0.6.9"
 # v0.6.9   - 20191205
 #               -   zero base graphs by default
 #               -   config option GraphStart [zero, minbandwidth]
+# v0.7.0   - 20191213
+#               -   parallel nodes quering
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -152,13 +154,6 @@ $v = "0.6.9"
 #       2. Create systemd service specify path to this script and configuration. Examples on github.
 #
 
-$wellKnownSat = @{
-    "118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW" = "stefan-benten";
-    "12EayRS2V1kEsWESU9QMRseFhdxYxKicsiFmxrsLZHeLUtdps3S" = "us-central-1";
-    "121RTSDpyNZVcEU84Ticf2L1ntiuUimbWgfATz21tuvgk3vzoA6" = "asia-east-1";
-    "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1"
-}
-
 $repairOptionValues = @(
     "none", 
     "totals", 
@@ -170,6 +165,159 @@ $graphStartOptionValues = @(
     "zero", 
     "minbandwidth"
 )
+
+$code = @'
+using System;
+using System.Management.Automation;
+using System.Management.Automation.Runspaces;
+
+namespace InProcess
+{
+    public class InMemoryJob : System.Management.Automation.Job
+    {
+        private static int _InMemoryJobNumber = 0;
+        private PowerShell _PowerShell;
+        private bool _IsDisposed = false;
+        private IAsyncResult _AsyncResult = null;
+
+        public override bool HasMoreData 
+        {
+            get 
+            {
+                return (Output.Count > 0);
+            }
+        }
+        public override string Location 
+        {
+            get
+            {
+                return "In Process";
+            }
+        }
+        public override string StatusMessage
+        {
+            get
+            {
+                return String.Empty;
+            }
+        }
+
+        public InMemoryJob(PowerShell powerShell, string name)
+        {
+            _PowerShell = powerShell;
+            Init(name);
+        }
+        private void Init(string name)
+        {
+            int id = System.Threading.Interlocked.Add(ref _InMemoryJobNumber, 1);
+
+            if (!string.IsNullOrEmpty(name)) Name = name;
+            else Name = "InProcessJob" + id;
+
+            _PowerShell.Streams.Information = Information;
+            _PowerShell.Streams.Progress = Progress;
+            _PowerShell.Streams.Verbose = Verbose;
+            _PowerShell.Streams.Error = Error;
+            _PowerShell.Streams.Debug = Debug;
+            _PowerShell.Streams.Warning = Warning;
+            _PowerShell.Runspace.AvailabilityChanged += new EventHandler<RunspaceAvailabilityEventArgs>(Runspace_AvailabilityChanged);
+        }
+
+        void Runspace_AvailabilityChanged(object sender, RunspaceAvailabilityEventArgs e)
+        {
+            if (e.RunspaceAvailability == RunspaceAvailability.Available) SetJobState(JobState.Completed);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && !_IsDisposed)
+            {
+                _IsDisposed = true;
+                try
+                {
+                    if (!IsFinishedState()) StopJob();
+                    foreach (Job job in ChildJobs) job.Dispose();
+                }
+                finally { base.Dispose(disposing); }
+            }
+        }
+
+        public bool IsFinishedState()
+        {
+           return (JobStateInfo.State == JobState.Completed || JobStateInfo.State == JobState.Failed || JobStateInfo.State == JobState.Stopped);
+        }
+
+        public void Start()
+        {
+            _AsyncResult = _PowerShell.BeginInvoke<PSObject, PSObject>(null, Output);
+            SetJobState(JobState.Running);
+        }
+
+        public override void StopJob()
+        {
+            _PowerShell.Stop();
+            _PowerShell.EndInvoke(_AsyncResult);
+            SetJobState(JobState.Stopped);
+        }
+
+        public void WaitJob()
+        {
+            _AsyncResult.AsyncWaitHandle.WaitOne();
+        }
+        public void WaitJob(TimeSpan timeout)
+        {
+            _AsyncResult.AsyncWaitHandle.WaitOne(timeout);
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $code
+function Start-QueryNode
+{
+  [CmdletBinding()]
+  param
+  (
+    $Name,
+    [scriptblock] $InitializationScript,
+    $Address,
+    $Config,
+    $Query
+  )
+  function Add-Job
+  {
+    [cmdletbinding()]
+    param ($job)
+    $pscmdlet.JobRepository.Add($job)
+  }
+  $PowerShell = [PowerShell]::Create().AddScript($InitializationScript)
+  $PowerShell.Invoke()
+  $PowerShell.AddCommand("QueryNode").AddParameter("address", $Address).AddParameter("config", $Config).AddParameter("query", $Query) | Out-Null
+  $MemoryJob = New-Object InProcess.InMemoryJob $PowerShell, $Name
+  $MemoryJob.Start()
+  Add-Job $MemoryJob
+  $MemoryJob
+}
+function StartWebRequest
+{
+  [CmdletBinding()]
+  param
+  (
+    $Name,
+    $Address,
+    $Timeout
+  )
+  function Add-Job
+  {
+    [cmdletbinding()]
+    param ($job)
+    $pscmdlet.JobRepository.Add($job)
+  }
+  $PowerShell = [PowerShell]::Create().AddScript("(Invoke-WebRequest -Uri $address -TimeoutSec $timeout).Content | ConvertFrom-Json").AddParameter("address", $Address).AddParameter("timeout", $Timeout)
+  $MemoryJob = New-Object InProcess.InMemoryJob $PowerShell, $Name
+  $MemoryJob.Start()
+  Add-Job $MemoryJob
+  $MemoryJob
+}
 
 function CheckRepairDisplay{
     param($config, $where)
@@ -196,7 +344,8 @@ function IsAnniversaryVersion {
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
     Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
     Write-Host ""
-    Write-Host "Thanks Sans Konor for bug hunting"
+    Write-Host "Thanks Sans Kokor for bug hunting"
+    Write-Host "Thanks underflow17"
     Write-Host ""
 }
 
@@ -296,13 +445,13 @@ function LoadConfig{
 
 function GetJson
 {
-    param($uri)
+    param($uri, $timeout)
 
     #RAW
-    # ((Invoke-WebRequest -Uri http://192.168.156.204:4404/api/dashboard).content | ConvertFrom-Json).data
-    # ((Invoke-WebRequest -Uri http://192.168.156.204:4404/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/dashboard).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
 
-    $resp = Invoke-WebRequest -Uri $uri -TimeoutSec 5
+    $resp = Invoke-WebRequest -Uri $uri -TimeoutSec $timeout
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
     $json = ConvertFrom-Json $resp.Content
     if (-not [System.String]::IsNullOrEmpty($json.Error)) { throw $json.Error }
@@ -323,6 +472,7 @@ function FixNode {
     try {
         if ($node.lastPinged.GetType().Name -eq "String") { $node.lastPinged = [DateTimeOffset]::Parse($node.lastPinged)}
         elseif ($node.lastPinged.GetType().Name -eq "DateTime") { $node.lastPinged = [DateTimeOffset]$node.lastPinged }
+        if ($node.lastPinged -gt [DateTimeOffset]::Now) { $node.lastPinged = [DateTimeOffset]::Now }
     }
     catch { Write-Host -ForegroundColor Red $_.Exception.Message }
 }
@@ -347,102 +497,157 @@ function FilterBandwidth {
     }
 }
 
-function GetNodes
-{
-    param ($config, $query)
-    $result = [System.Collections.Generic.List[PSCustomObject]]@()
-    
-    #Start get storj services versions
-    $jobName = "StorjVersionQuery"
-    $address = "https://version.storj.io"
-    $timeout = 5
+function GetNodeName{
+    param ($config, $id)
+    $name = ($config.WellKnownNodes | Select-Object -ExpandProperty $id)
+    if ([String]::IsNullOrEmpty($name)) { $name = Compact($id) }
+    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
+    return $name
+}
 
-    $job = Get-Job -Name $jobName -ErrorAction Ignore | Select-Object -First 1
-    if ($null -eq $job) {
-        Write-Host ("Send version query to {0}" -f $address)
-        Start-Job -Name $jobName -ScriptBlock {(Invoke-WebRequest -Uri $args[0]).Content | ConvertFrom-Json } -ArgumentList $address | Out-Null
+function GetSatName{
+    param ($config, $id, $url)
+
+    $wellKnownSat = @{
+        "118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW" = "stefan-benten";
+        "12EayRS2V1kEsWESU9QMRseFhdxYxKicsiFmxrsLZHeLUtdps3S" = "us-central-1";
+        "121RTSDpyNZVcEU84Ticf2L1ntiuUimbWgfATz21tuvgk3vzoA6" = "asia-east-1";
+        "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1"
     }
-    elseif ($job.State -eq "Running") { Write-Host "version query still executed" }
-    elseif ($job.State -eq "Completed") { Write-Host "Got version info" }
-    else { Write-Host ("{0} in state {1}" -f $jobName, $job.State) }
     
-    $config.Nodes | ForEach-Object {
-        $address = $_
-        try {
-            $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address)
-            $name = GetNodeName -config $config -id $dash.nodeID
-            if ($null -ne $query.Node) {
-                if (-not ($name -match $query.Node)) { return }
-            }
+    $name = $wellKnownSat[$id] 
+    if ($null -eq $name) {
+        $point = $url.IndexOf(":")
+        if ($point -gt 0) { $name = $url.Substring(0, $point) }
+    }
+    
+    if ($null -eq $name) { $name = Compact($id) }
+    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
+    Write-Output $name
+}
 
-            FixNode($dash)
-            $dash | Add-Member -NotePropertyName Address -NotePropertyValue $address
-            $dash | Add-Member -NotePropertyName Name -NotePropertyValue $name
-            $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
-            $dash | Add-Member -NotePropertyName BwSummary -NotePropertyValue $null
-            $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
-            $dash | Add-Member -NotePropertyName Uptime -NotePropertyValue $null
-            $dash | Add-Member -NotePropertyName LastPingWarningValue -NotePropertyValue 0
-            $dash | Add-Member -NotePropertyName LastVersion -NotePropertyValue $null
-            $dash | Add-Member -NotePropertyName MinimalVersion -NotePropertyValue $null
-            $dash | Add-Member -NotePropertyName LastVerWarningValue -NotePropertyValue $null
+#Debug 
+#$t = QueryNode -address "192.168.155.1:4401" -config $config -query $query
+function QueryNode
+{
+    param($address, $config, $query)
+    $timeoutSec = 30
 
-            $dash.satellites | ForEach-Object {
-                $satid = $_.id
-                try {
-                    $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid)
+    try {
+        if ($null -eq $config) {Write-Error "Bad config in QueryNode"}
+        $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address) -timeout $timeoutSec
+
+        $name = GetNodeName -config $config -id $dash.nodeID
+        if ($null -ne $query.Node) {
+            if (-not ($name -match $query.Node)) { return }
+        }
+
+        FixNode($dash)
+        $dash | Add-Member -NotePropertyName Address -NotePropertyValue $address
+        $dash | Add-Member -NotePropertyName Name -NotePropertyValue $name
+        $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
+        $dash | Add-Member -NotePropertyName BwSummary -NotePropertyValue $null
+        $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
+        $dash | Add-Member -NotePropertyName Uptime -NotePropertyValue $null
+        $dash | Add-Member -NotePropertyName LastPingWarningValue -NotePropertyValue 0
+        $dash | Add-Member -NotePropertyName LastVersion -NotePropertyValue $null
+        $dash | Add-Member -NotePropertyName MinimalVersion -NotePropertyValue $null
+        $dash | Add-Member -NotePropertyName LastVerWarningValue -NotePropertyValue $null
+
+        $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
+        $dash.satellites | ForEach-Object {
+            $satid = $_.id
+            $job = StartWebRequest -Name "SatQueryJob" -Address ("http://{0}/api/satellite/{1}" -f $address, $satid) -Timeout $timeoutSec
+            $waitList.Add($job)
+        }
+
+        $start = [System.DateTimeOffset]::Now
+        while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec ) ) {
+            $completed = $waitList | Where-Object { $_.IsFinishedState() }
+            $completed | ForEach-Object {
+                if ($_.Error.Count -gt 0 ) { Write-Error $_.Error[0] }
+                elseif( $_.Output.Count -eq 1 ) { 
+                    $sat = $_.Output[0].data
+                    $dashSat = $dash.satellites | Where-Object { $_.id -eq $sat.id }
+
                     if ($sat.bandwidthDaily.Length -gt 0) {
                         if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
                         elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
                         $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
                     }
-                    $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $_.id -url $_.url)
-                    $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($_.url)
-                    $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($_.disqualified)
+                    $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
+                    $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
+                    $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
                     $dash.Sat.Add($sat)
                 }
-                catch {
-                    Write-Host -ForegroundColor Red ("Node on address {0} fail sat {1}: {2}" -f $address, $satid, $_.Exception.Message )        
-                }
-            }
-            $dash.PSObject.Properties.Remove('satellites')            
-            $result.Add($dash)
-        }
-        catch {
-            Write-Host -ForegroundColor Red ("Node on address {0} fail: {1}" -f $address, $_.Exception.Message )
-        }
-    }
-
-    if ($null -eq $job) {
-        #wait 5 seconds
-        Write-Host ("Wait version no more than {0} seconds" -f $timeout)
-        $job = Wait-Job -Name $jobName -Timeout $timeout
-    }
-
-    if (($null -ne $job) -and ($job.State -eq "Completed")) {
-        $satVer = (Receive-Job -Job $job)
-        Remove-Job -Job $job
-        if ($null -ne $satVer) {
-            Write-Host "Set version info"
-            $latest = $satVer.processes.storagenode.suggested.version
-            $minimal = [String]::Join('.',  $satVer.Storagenode.major.ToString(), $satVer.Storagenode.minor.ToString(), $satVer.Storagenode.patch.ToString())
-
-            #DEBUG latest
-            #$latest = "99.0.0"
-
-            #DEBUG oldest
-            #$minimal = "90"
-            #$latest = "90.1"
-
-            Write-Host ("Latest storagenode version is {0}" -f $latest)
-            $result | ForEach-Object { 
-                $_.LastVersion = $latest 
-                $_.MinimalVersion = $minimal 
+                else { Write-Error ("Bad output from {0}" -f $_.Name) }
+                $waitList.Remove($_) | Out-Null
             }
         }
-        else { Write-Host -ForegroundColor Red "Version query completed with no results" }
+        if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
+        $dash.PSObject.Properties.Remove('satellites')            
     }
-    return $result
+    catch {
+        Write-Error ("Node on address {0} fail: {1}" -f $address, $_.Exception.Message )
+    }
+    Write-Output $dash
+}
+
+$init = 
+[scriptblock]::Create(@"
+function GetJson {$function:GetJson}
+function GetNodeName {$function:GetNodeName}
+function GetSatName {$function:GetSatName}
+function FixNode {$function:FixNode}
+function FixDateSat {$function:FixDateSat}
+function FilterBandwidth {$function:FilterBandwidth}
+function StartWebRequest {$function:StartWebRequest}
+function QueryNode {$function:QueryNode}
+"@)
+
+function GetNodes
+{
+    param ($config, $query)
+    $timeoutSec = 30
+    $result = [System.Collections.Generic.List[PSCustomObject]]@()
+    
+    #Start get storj services versions
+    $jobVersion = StartWebRequest -Name "StorjVersionQuery" -Address "https://version.storj.io" -Timeout $timeoutSec
+    
+    $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
+    $config.Nodes | ForEach-Object {
+        $address = $_
+        $jobNode = Start-QueryNode -Name ("JobQueryNode[{0}]" -f $address) -InitializationScript $init -Address $address -Config $config -Query $query 
+        $waitList.Add($jobNode)
+    }
+    $start = [System.DateTimeOffset]::Now
+    while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec)) {
+        $completed = $waitList | Where-Object { $_.IsFinishedState() }
+        $completed | ForEach-Object {
+            if ($_.Error.Count -gt 0 ) { Write-Error $_.Error[0] }
+            elseif( $_.Output.Count -eq 1 ) { $result.Add($_.Output[0]) }
+            else { Write-Error ("Bad output from {0}" -f $_.Name) }
+            $waitList.Remove($_) | Out-Null
+        }
+    }
+    if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
+    
+    $jobVersion.WaitJob([TimeSpan]::FromSeconds(1))
+    if (-not $jobVersion.IsFinishedState()) { Write-Error "jobVersion hang" }
+    elseif ($jobVersion.Error.Count -gt 0) { Write-Error $jobVersion.Error }
+    elseif ($jobVersion.Output.Count -ne 1) { Write-Error "Bad output from jobVersion" }
+    else {
+        $satVer = $jobVersion.Output[0]
+        $latest = $satVer.processes.storagenode.suggested.version
+        $minimal = [String]::Join('.',  $satVer.Storagenode.major.ToString(), $satVer.Storagenode.minor.ToString(), $satVer.Storagenode.patch.ToString())
+        $time = ($jobVersion.PSEndTime - $jobVersion.PSEndTime).TotalMilliseconds
+        Write-Host ("Latest storagenode version is {0}, query time {1}ms" -f $latest, $time)
+        $result | ForEach-Object { 
+            $_.LastVersion = $latest 
+            $_.MinimalVersion = $minimal 
+        }
+    }
+    return $result.ToArray()
 }
 
 function AggBandwidth
@@ -612,27 +817,6 @@ function Compact
 {
     param($id)
     return $id.Substring(0,4) + "-" + $id.Substring($id.Length-2)
-}
-
-function GetNodeName{
-    param ($config, $id)
-    $name = $config.WellKnownNodes."$id"
-    if ($null -eq $name) { $name = Compact($id) }
-    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
-    return $name
-}
-function GetSatName{
-    param ($config, $id, $url)
-
-    $name = $wellKnownSat[$id] 
-    if ($null -eq $name) {
-        $point = $url.IndexOf(":")
-        if ($point -gt 0) { $name = $url.Substring(0, $point) }
-    }
-    
-    if ($null -eq $name) { $name = Compact($id) }
-    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
-    return $name
 }
 
 function Round
@@ -1062,21 +1246,6 @@ function DisplayNodes {
     }
 
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
-    Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
-
-    if (CheckRepairDisplay -config $config -where "totals") {
-        Write-Output ("Total repair {0} Egress, {1} Ingress" -f 
-            (HumanBytes($bwsummary.RepairEgress)), 
-            (HumanBytes($bwsummary.RepairIngress))
-        )
-    }
-
-    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
-        (HumanBytes($bwsummary.Egress + $bwsummary.Ingress)), 
-        (HumanBytes($bwsummary.Egress)), 
-        (HumanBytes($bwsummary.Ingress)), 
-        (HumanBytes($bwsummary.Delete))
-    )
 
     $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart.UtcDateTime.Date -eq [DateTimeOffset]::UtcNow.UtcDateTime.Date} | AggBandwidth 
     Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
@@ -1085,6 +1254,22 @@ function DisplayNodes {
         (HumanBytes($today.Ingress)), 
         (HumanBytes($today.Delete))
     )
+
+    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
+    (HumanBytes($bwsummary.Egress + $bwsummary.Ingress)), 
+    (HumanBytes($bwsummary.Egress)), 
+    (HumanBytes($bwsummary.Ingress)), 
+    (HumanBytes($bwsummary.Delete))
+    )
+
+    if (CheckRepairDisplay -config $config -where "totals") {
+        Write-Output ("Total repair {0} Egress, {1} Ingress" -f 
+            (HumanBytes($bwsummary.RepairEgress)), 
+            (HumanBytes($bwsummary.RepairIngress))
+        )
+    }
+
+    Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
 
     Write-Output ("from {0:yyyy.MM.dd} to {1:yyyy.MM.dd} on {2} nodes" -f 
         $bwsummary.From, 
@@ -1303,19 +1488,6 @@ function DisplayTraffic {
 
 }
 
-Preamble
-if ($args.Contains("example")) {
-    $config = DefaultConfig
-    $config | ConvertTo-Json
-    return
-}
-
-$config = LoadConfig -cmdlineArgs $args
-#DEBUG
-#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
-
-if (-not $config) { return }
-
 function GetQuery {
     param($cmdlineArgs)
 
@@ -1342,14 +1514,30 @@ function GetQuery {
         Egress = $cmdlineArgs.Contains("egress")
         Days = $days
         Node = $node
+        StartData = [System.DateTimeOffset]::Now
+        EndData = $null
     }
     return $query
 }
+
+Preamble
+if ($args.Contains("example")) {
+    $config = DefaultConfig
+    $config | ConvertTo-Json
+    return
+}
+
+$config = LoadConfig -cmdlineArgs $args
+#DEBUG
+#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+
+if (-not $config) { return }
 
 $query = GetQuery -cmdlineArgs $args
 $nodes = GetNodes -config $config -query $query
 $score = GetScore -nodes $nodes
 $bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+$query.EndData = [DateTimeOffset]::Now
 ;
 #DEBUG    
 if ($args.Contains("monitor")) {
@@ -1377,7 +1565,9 @@ elseif ($nodes.Count -gt 0) {
         DisplayScore -score $score -bwsummary $bwsummary
     }
     DisplayNodes -nodes $nodes -bwsummary $bwsummary -config $config
+    Write-Host ("Data collect time {0}s" -f ($query.EndData - $query.StartData).TotalSeconds)
 }
 
 #DEBUG
+#cd C:\Projects\Repos\Storj
 #.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf
