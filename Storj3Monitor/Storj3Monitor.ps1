@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.0"
+$v = "0.7.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -113,6 +113,9 @@ $v = "0.7.0"
 #               -   config option GraphStart [zero, minbandwidth]
 # v0.7.0   - 20191213
 #               -   parallel nodes quering
+# v0.7.1   - 20191216
+#               -   Top 5 vetting nodes
+#               -   Fix Compat function not included in job scope
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -576,6 +579,7 @@ function QueryNode
                         $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
                     }
                     $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
+                    $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
                     $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
                     $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
                     $dash.Sat.Add($sat)
@@ -596,6 +600,7 @@ function QueryNode
 $init = 
 [scriptblock]::Create(@"
 function GetJson {$function:GetJson}
+function Compact {$function:Compact}
 function GetNodeName {$function:GetNodeName}
 function GetSatName {$function:GetSatName}
 function FixNode {$function:FixNode}
@@ -1244,6 +1249,17 @@ function DisplayNodes {
         @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} `
         | Out-String -Width 200
     }
+
+    $vetting = $nodes | Select-Object -ExpandProperty Sat `
+        | Where-Object { $_.audit.totalCount -lt 100 } `
+        | Sort-Object -Descending {$_.audit.totalCount} `
+        | Select-Object -First 5 NodeName, Name, @{ Name = 'Cnt';  Expression =  { $_.audit.totalCount }}
+    
+        if ($vetting.Count -gt 0) {
+            Write-Output ("Top {0} vetting nodes:" -f $vetting.Count)
+            $vetting | Format-Table Cnt, NodeName, Name
+            #$vetting | ForEach-Object { Write-Output ("{0} {1} on {2}" -f $_.Cnt, $_.NodeName, $_.Name ) }
+        }
 
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
 
