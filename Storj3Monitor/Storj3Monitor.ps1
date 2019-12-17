@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.1"
+$v = "0.7.2"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -116,6 +116,11 @@ $v = "0.7.1"
 # v0.7.1   - 20191216
 #               -   Top 5 vetting nodes
 #               -   Fix Compat function not included in job scope
+# v0.7.2   - 20191217
+#               -   add vetting to sat details
+#               -   add workaround to job awaiter for linux
+#               -   add -np cmdline parameter to ommit parallel queries
+#               -   small fixes
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -137,9 +142,15 @@ $v = "0.7.1"
 #
 #
 #   Display only for specefied nodes
-#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress] [-node name]
+#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress] [-node name] [-np]
 #
 #
+#      Where 
+#           ingress     - only ingress traffic
+#           egress      - only egress traffic
+#           node        - filter output to that node
+#           np          - no parallel execution
+#   
 #   Test config and mail sender
 #       pwsh ./Storj3Monitor.ps1 -c <config-file> testmail
 #
@@ -267,9 +278,9 @@ namespace InProcess
         {
             _AsyncResult.AsyncWaitHandle.WaitOne();
         }
-        public void WaitJob(TimeSpan timeout)
+        public bool WaitJob(TimeSpan timeout)
         {
-            _AsyncResult.AsyncWaitHandle.WaitOne(timeout);
+            return _AsyncResult.AsyncWaitHandle.WaitOne(timeout);
         }
     }
 }
@@ -286,18 +297,11 @@ function Start-QueryNode
     $Config,
     $Query
   )
-  function Add-Job
-  {
-    [cmdletbinding()]
-    param ($job)
-    $pscmdlet.JobRepository.Add($job)
-  }
   $PowerShell = [PowerShell]::Create().AddScript($InitializationScript)
   $PowerShell.Invoke()
   $PowerShell.AddCommand("QueryNode").AddParameter("address", $Address).AddParameter("config", $Config).AddParameter("query", $Query) | Out-Null
   $MemoryJob = New-Object InProcess.InMemoryJob $PowerShell, $Name
   $MemoryJob.Start()
-  Add-Job $MemoryJob
   $MemoryJob
 }
 function StartWebRequest
@@ -309,16 +313,9 @@ function StartWebRequest
     $Address,
     $Timeout
   )
-  function Add-Job
-  {
-    [cmdletbinding()]
-    param ($job)
-    $pscmdlet.JobRepository.Add($job)
-  }
   $PowerShell = [PowerShell]::Create().AddScript("(Invoke-WebRequest -Uri $address -TimeoutSec $timeout).Content | ConvertFrom-Json").AddParameter("address", $Address).AddParameter("timeout", $Timeout)
   $MemoryJob = New-Object InProcess.InMemoryJob $PowerShell, $Name
   $MemoryJob.Start()
-  Add-Job $MemoryJob
   $MemoryJob
 }
 
@@ -529,6 +526,43 @@ function GetSatName{
     Write-Output $name
 }
 
+function GetJobResultNormal {
+    param ([System.Collections.Generic.List[[InProcess.InMemoryJob]]] $waitList, $timeoutSec)
+
+    $start = [System.DateTimeOffset]::Now
+    while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec)) {
+        $completed = $waitList | Where-Object { $_.IsFinishedState() }
+        $completed | ForEach-Object {
+            if ($_.Error.Count -gt 0 ) { Write-Error $_.Error[0] }
+            elseif( $_.Output.Count -eq 1 ) { Write-Output $_.Output[0] }
+            else { Write-Error ("Bad output from {0}" -f $_.Name) }
+            $waitList.Remove($_) | Out-Null
+        }
+    }
+    if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
+}
+
+function GetJobResultFailSafe {
+    param ([System.Collections.Generic.List[[InProcess.InMemoryJob]]] $waitList, $timeoutSec)
+    
+    $start = [System.DateTimeOffset]::Now
+    $timeoutTry =  [TimeSpan]::FromSeconds($timeoutSec)/$waitList.Count
+    
+    while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec)) {
+        for($i=$waitList.Count-1; $i -ge 0; $i--)
+        {
+            $job = $waitList[$i]
+            if ($job.WaitJob($timeoutTry)) {
+                $waitList.Remove($job) | Out-Null
+                if ($job.Error.Count -gt 0 ) { Write-Error $job.Error[0] -ErrorAction Continue }
+                elseif( $job.Output.Count -eq 1 ) { Write-Output $job.Output[0] }
+                else { Write-Error ("Bad output from {0}" -f $_.Name) -ErrorAction Continue }
+            }
+        }
+    }
+    if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
+}
+
 #Debug 
 #$t = QueryNode -address "192.168.155.1:4401" -config $config -query $query
 function QueryNode
@@ -557,38 +591,48 @@ function QueryNode
         $dash | Add-Member -NotePropertyName MinimalVersion -NotePropertyValue $null
         $dash | Add-Member -NotePropertyName LastVerWarningValue -NotePropertyValue $null
 
-        $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
-        $dash.satellites | ForEach-Object {
-            $satid = $_.id
-            $job = StartWebRequest -Name "SatQueryJob" -Address ("http://{0}/api/satellite/{1}" -f $address, $satid) -Timeout $timeoutSec
-            $waitList.Add($job)
+        $satResult = [System.Collections.Generic.List[PSCustomObject]]@()
+
+        if ($query.Parallel) {
+            $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
+            $dash.satellites | ForEach-Object {
+                $satid = $_.id
+                $job = StartWebRequest -Name "SatQueryJob" -Address ("http://{0}/api/satellite/{1}" -f $address, $satid) -Timeout $timeoutSec
+                $waitList.Add($job)
+            }
+            GetJobResultFailSafe -waitList $waitList -timeoutSec $timeoutSec | ForEach-Object { $satResult.Add($_.data) }
         }
-
-        $start = [System.DateTimeOffset]::Now
-        while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec ) ) {
-            $completed = $waitList | Where-Object { $_.IsFinishedState() }
-            $completed | ForEach-Object {
-                if ($_.Error.Count -gt 0 ) { Write-Error $_.Error[0] }
-                elseif( $_.Output.Count -eq 1 ) { 
-                    $sat = $_.Output[0].data
-                    $dashSat = $dash.satellites | Where-Object { $_.id -eq $sat.id }
-
-                    if ($sat.bandwidthDaily.Length -gt 0) {
-                        if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
-                        elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
-                        $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
-                    }
-                    $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
-                    $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
-                    $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
-                    $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
-                    $dash.Sat.Add($sat)
+        else {
+            $dash.satellites | ForEach-Object {
+                $satid = $_.id
+                try 
+                {
+                    Write-Host -NoNewline ("query {0}..." -f $address)
+                    $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid) -timeout $timeoutSec
+                    $satResult.Add($sat)
+                    Write-Host "completed"
                 }
-                else { Write-Error ("Bad output from {0}" -f $_.Name) }
-                $waitList.Remove($_) | Out-Null
+                catch {
+                    WriteError ($_.Exception.Message)
+                }
             }
         }
-        if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
+
+        $satResult | ForEach-Object {
+            $sat = $_
+            $dashSat = $dash.satellites | Where-Object { $_.id -eq $sat.id }
+            if ($sat.bandwidthDaily.Length -gt 0) {
+                if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
+                elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
+                $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
+            }
+            $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
+            $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
+            $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
+            $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
+            $dash.Sat.Add($sat)
+        }
+
         $dash.PSObject.Properties.Remove('satellites')            
     }
     catch {
@@ -606,6 +650,8 @@ function GetSatName {$function:GetSatName}
 function FixNode {$function:FixNode}
 function FixDateSat {$function:FixDateSat}
 function FilterBandwidth {$function:FilterBandwidth}
+function GetJobResultNormal {$function:GetJobResultNormal}
+function GetJobResultFailSafe {$function:GetJobResultFailSafe}
 function StartWebRequest {$function:StartWebRequest}
 function QueryNode {$function:QueryNode}
 "@)
@@ -618,26 +664,25 @@ function GetNodes
     
     #Start get storj services versions
     $jobVersion = StartWebRequest -Name "StorjVersionQuery" -Address "https://version.storj.io" -Timeout $timeoutSec
-    
-    $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
-    $config.Nodes | ForEach-Object {
-        $address = $_
-        $jobNode = Start-QueryNode -Name ("JobQueryNode[{0}]" -f $address) -InitializationScript $init -Address $address -Config $config -Query $query 
-        $waitList.Add($jobNode)
+
+    if ($query.Parallel) {
+        $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
+        $config.Nodes | ForEach-Object {
+            $address = $_
+            $jobNode = Start-QueryNode -Name ("JobQueryNode[{0}]" -f $address) -InitializationScript $init -Address $address -Config $config -Query $query 
+            $waitList.Add($jobNode)
+        }
+        GetJobResultFailSafe -waitList $waitList -timeoutSec $timeoutSec | ForEach-Object { $result.Add($_)}
     }
-    $start = [System.DateTimeOffset]::Now
-    while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec)) {
-        $completed = $waitList | Where-Object { $_.IsFinishedState() }
-        $completed | ForEach-Object {
-            if ($_.Error.Count -gt 0 ) { Write-Error $_.Error[0] }
-            elseif( $_.Output.Count -eq 1 ) { $result.Add($_.Output[0]) }
-            else { Write-Error ("Bad output from {0}" -f $_.Name) }
-            $waitList.Remove($_) | Out-Null
+    else {
+        $config.Nodes | ForEach-Object {
+            $address = $_
+            $dash = QueryNode -address $address -config $config -query $query
+            $result.Add($dash)
         }
     }
-    if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
     
-    $jobVersion.WaitJob([TimeSpan]::FromSeconds(1))
+    $jobVersion.WaitJob([TimeSpan]::FromSeconds(1)) | Out-Null
     if (-not $jobVersion.IsFinishedState()) { Write-Error "jobVersion hang" }
     elseif ($jobVersion.Error.Count -gt 0) { Write-Error $jobVersion.Error }
     elseif ($jobVersion.Output.Count -ne 1) { Write-Error "Bad output from jobVersion" }
@@ -1251,15 +1296,15 @@ function DisplayNodes {
     }
 
     $vetting = $nodes | Select-Object -ExpandProperty Sat `
-        | Where-Object { $_.audit.totalCount -lt 100 } `
-        | Sort-Object -Descending {$_.audit.totalCount} `
-        | Select-Object -First 5 NodeName, Name, @{ Name = 'Cnt';  Expression =  { $_.audit.totalCount }}
-    
-        if ($vetting.Count -gt 0) {
-            Write-Output ("Top {0} vetting nodes:" -f $vetting.Count)
-            $vetting | Format-Table Cnt, NodeName, Name
-            #$vetting | ForEach-Object { Write-Output ("{0} {1} on {2}" -f $_.Cnt, $_.NodeName, $_.Name ) }
-        }
+    | Where-Object { $_.audit.totalCount -lt 100 } `
+    | Sort-Object -Descending {$_.audit.totalCount} `
+    | Select-Object @{ Name = 'Audit count';  Expression =  { $_.audit.totalCount }}, @{ Name = 'Node'; Expression = { $_.NodeName }}, @{ Name = 'on Sat'; Expression = { $_.Name }}
+
+    if ($vetting.Count -gt 0) {
+        $top = $vetting | Select-Object -First 5
+        Write-Output ("Top {0} of {1} vettings:" -f $top.Count, $vetting.Count)
+        $top | Format-Table
+    }
 
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
 
@@ -1490,6 +1535,18 @@ function DisplaySat {
             GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
         }
         GraphTimelineDirect -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
+
+        $vetting = $sat.Group `
+        | Where-Object { $_.audit.totalCount -lt 100 } `
+        | Sort-Object -Descending {$_.audit.totalCount} `
+        | Select-Object @{ Name = 'Audit count';  Expression =  { $_.audit.totalCount }}, @{ Name = 'Node'; Expression = { $_.NodeName }}
+    
+        if ($vetting.Count -gt 0) {
+            $top = $vetting | Select-Object -First 5
+            Write-Output ("Top {0} of {1} vetting nodes:" -f $top.Count, $vetting.Count)
+            $top | Format-Table
+        }
+    
     }
     Write-Host
 }
@@ -1525,6 +1582,9 @@ function GetQuery {
     $index = $cmdlineArgs.IndexOf("-node")
     if ($index -ge 0) { $node = $cmdlineArgs[$index + 1] }
 
+    if ($cmdlineArgs.IndexOf("-np") -ge 0) { $parallel = $false }
+    else { $parallel = $true }
+
     $query = @{
         Ingress = $cmdlineArgs.Contains("ingress")
         Egress = $cmdlineArgs.Contains("egress")
@@ -1532,6 +1592,7 @@ function GetQuery {
         Node = $node
         StartData = [System.DateTimeOffset]::Now
         EndData = $null
+        Parallel = $parallel
     }
     return $query
 }
