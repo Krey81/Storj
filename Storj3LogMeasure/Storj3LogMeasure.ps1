@@ -262,9 +262,9 @@ function Acc
         # store all errors to logresult
         $jsonErrorParsed = $json.error
         if ($null -ne $jsonErrorParsed) {
-            if ($json.error.StartsWith("piecestore: piecestore protocol: write tcp")) {
+            if ($json.error.Contains("write tcp")) {
                 # "piecestore: piecestore protocol: write tcp 192.168.155.1:4301->87.106.194.21:47216: use of closed network connection"
-                if ($json.error -match "^piecestore: piecestore protocol: write tcp (?<from>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5}))->(?<to>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5}))\:\s?(?<err>.+)") {
+                if ($json.error -match "^(piecestore: piecestore protocol: )?write tcp (?<from>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5}))->(?<to>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d{1,5}))\:\s?(?<err>.+)") {
                     $jsonErrorParsed = "write tcp: " + $Matches["err"]
                 }
             }
@@ -1051,7 +1051,7 @@ else {
     Write-Host ("End of pipelenie. Process {0} lines, {1} seconds" -f $line, [int]($logResult.EndTime - $logResult.StartTime).TotalSeconds)
 }
 # cd C:\Projects\Repos\Storj
-#.\Storj3LogMeasure\Storj3LogMeasure.ps1 -logFile C:\----\node01.log -ST
+#.\Storj3LogMeasure\Storj3LogMeasure.ps1 -logFile "C:\-\node04_2020-01-31.log"
 
 
 

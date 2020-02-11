@@ -1,3 +1,5 @@
 Storj3Monitor/Storj3Monitor.code-workspace
 Storj3Monitor/ConfigSamples/Storj3Monitor.Debug.conf
+Storj3Monitor/ConfigSamples/Storj3Monitor.Krey.conf
 FailoverMonitor/FailoverMonitor.Krey.conf
+LogSplitter/logsplitter.ps1

@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.2"
+$v = "0.7.3"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -121,7 +121,11 @@ $v = "0.7.2"
 #               -   add workaround to job awaiter for linux
 #               -   add -np cmdline parameter to ommit parallel queries
 #               -   small fixes
-
+# v0.7.3   - 20200211
+#               -   fix null call on new satellite, add saltlake satellite
+#               -   remove deleted column
+#               -   Uptime now meen uptime failed count. Enable uptime monitoring with UptimeThreashold=10 by default.
+#               -   Add Runtime column (display count of hours from node start)
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
 #               -   Big thanks (10-bottles first), greatings for all versions of this script
@@ -440,6 +444,10 @@ function LoadConfig{
         throw ("Bad GraphStart value in config")
     }
 
+    if ($null -eq $config.UptimeThreshold) { 
+        $config | Add-Member -NotePropertyName UptimeThreshold -NotePropertyValue 10
+    }
+
     return $config
 }
 
@@ -472,7 +480,10 @@ function FixNode {
     try {
         if ($node.lastPinged.GetType().Name -eq "String") { $node.lastPinged = [DateTimeOffset]::Parse($node.lastPinged)}
         elseif ($node.lastPinged.GetType().Name -eq "DateTime") { $node.lastPinged = [DateTimeOffset]$node.lastPinged }
+        
         if ($node.lastPinged -gt [DateTimeOffset]::Now) { $node.lastPinged = [DateTimeOffset]::Now }
+
+        if ($node.startedAt.GetType().Name -eq "DateTime") { $node.startedAt = [DateTimeOffset]$node.startedAt }
     }
     catch { Write-Host -ForegroundColor Red $_.Exception.Message }
 }
@@ -513,10 +524,11 @@ function GetSatName{
         "12EayRS2V1kEsWESU9QMRseFhdxYxKicsiFmxrsLZHeLUtdps3S" = "us-central-1";
         "121RTSDpyNZVcEU84Ticf2L1ntiuUimbWgfATz21tuvgk3vzoA6" = "asia-east-1";
         "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1"
+        "1wFTAgs9DP5RSnCqKV1eLf6N9wtk4EAtmN5DpSxcs8EjT69tGE"  = "saltlake"
     }
     
     $name = $wellKnownSat[$id] 
-    if ($null -eq $name) {
+    if (($null -eq $name) -and ($null -ne $url)) {
         $point = $url.IndexOf(":")
         if ($point -gt 0) { $name = $url.Substring(0, $point) }
     }
@@ -564,7 +576,7 @@ function GetJobResultFailSafe {
 }
 
 #Debug 
-#$t = QueryNode -address "192.168.155.1:4401" -config $config -query $query
+#$t = QueryNode -address "51.89.68.95:4416" -config $config -query $query
 function QueryNode
 {
     param($address, $config, $query)
@@ -626,9 +638,9 @@ function QueryNode
                 elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
                 $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
             }
+            $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
             $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
             $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
-            $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
             $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
             $dash.Sat.Add($sat)
         }
@@ -843,7 +855,7 @@ function GetScore
                 SatelliteId = $sat.id
                 SatelliteName = $sat.Name
                 Audit = $sat.audit.score
-                Uptime = $sat.uptime.score
+                Uptime = ($sat.uptime.totalCount - $sat.uptime.successCount)
                 Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
                 CommentMonitored = [String]::Join("; ", $commentMonitored)
                 Comment = [String]::Join("; ", $comment)
@@ -857,7 +869,7 @@ function GetScore
         $node = $nodes | Where-Object {$_.NodeId -eq $nodeId} | Select-Object -First 1
         $node.BwSummary = ($_.Group | Select-Object -ExpandProperty Bandwidth | AggBandwidth2)
         $node.Audit = ($_.Group | Select-Object -ExpandProperty Audit | Measure-Object -Min).Minimum
-        $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Min).Minimum
+        $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Max).Maximum
     }
 
     $score
@@ -1013,11 +1025,10 @@ function CheckScore{
             }
             elseif ($new.Audit -gt $old.Audit) { $oldScore[$idx].Audit = $new.Audit }
 
-            if ($old.Uptime -ge ($new.Uptime + $config.Threshold)) {
-                Write-Output ("Node {0} down uptime from {1} to {2} on {3}" -f $new.NodeName, $old.Uptime, $new.Uptime, $new.SatelliteId) | Tee-Object -Append -FilePath $body
+            if (($old.Uptime + $config.UptimeThreshold) -lt $new.Uptime) {
+                Write-Output ("Node {0} fail uptime checks. Old value {1}, new {2} on {3}" -f $new.NodeName, $old.Uptime, $new.Uptime, $new.SatelliteId) | Tee-Object -Append -FilePath $body
                 $oldScore[$idx].Uptime = $new.Uptime
             }
-            elseif ($new.Uptime -gt $old.Uptime) { $oldScore[$idx].Uptime = $new.Uptime }
 
             if ($old.CommentMonitored -ne $new.CommentMonitored) {
                 Write-Output ("Node {0} update comment for {1} to {2}. Old was {3}" -f $new.NodeName, $new.SatelliteName, $new.CommentMonitored, $old.CommentMonitored) | Tee-Object -Append -FilePath $body
@@ -1281,15 +1292,16 @@ function DisplayNodes {
 
         $_.Group | Sort-Object Name | Format-Table -AutoSize `
         @{n="Node"; e={$_.Name}}, `
+        @{n="Runtime"; e={[int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours)}}, `
         @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
         @{n="Audit"; e={Round($_.Audit)}}, `
-        @{n="Uptime"; e={Round($_.Uptime)}}, `
+#        @{n="Uptime"; e={Round($_.Uptime)}}, `
         @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
         @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
         @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
         @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
         @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
-        @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
+#        @{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
         @{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
         @{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} `
         | Out-String -Width 200
@@ -1309,18 +1321,18 @@ function DisplayNodes {
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
 
     $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart.UtcDateTime.Date -eq [DateTimeOffset]::UtcNow.UtcDateTime.Date} | AggBandwidth 
-    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
+    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress" -f 
         (HumanBytes($today.Egress + $today.Ingress)), 
         (HumanBytes($today.Egress)), 
-        (HumanBytes($today.Ingress)), 
-        (HumanBytes($today.Delete))
+        (HumanBytes($today.Ingress))
+        #,(HumanBytes($today.Delete))
     )
 
-    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, {3} Delete" -f 
+    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress" -f 
     (HumanBytes($bwsummary.Egress + $bwsummary.Ingress)), 
     (HumanBytes($bwsummary.Egress)), 
-    (HumanBytes($bwsummary.Ingress)), 
-    (HumanBytes($bwsummary.Delete))
+    (HumanBytes($bwsummary.Ingress))
+    #,(HumanBytes($bwsummary.Delete))
     )
 
     if (CheckRepairDisplay -config $config -where "totals") {
@@ -1366,14 +1378,14 @@ function DisplayScore {
             'Node'      = $_.NodeName
             'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
             'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
-            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
+#            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
-            'Uptime'    = Round($_.Uptime)
+            'UptimeFail'    = Round($_.Uptime)
             'Comment'   = "- " + [String]::Join("; ", $comment)
         }
         $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
     }
-    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Delete, Audit, Uptime, Comment | Out-String -Width 200
+    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, UptimeFail, Comment | Out-String -Width 200
 
     Write-Host
 }
@@ -1606,7 +1618,7 @@ if ($args.Contains("example")) {
 
 $config = LoadConfig -cmdlineArgs $args
 #DEBUG
-#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Krey.conf"
 
 if (-not $config) { return }
 
@@ -1647,4 +1659,4 @@ elseif ($nodes.Count -gt 0) {
 
 #DEBUG
 #cd C:\Projects\Repos\Storj
-#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Krey.conf
