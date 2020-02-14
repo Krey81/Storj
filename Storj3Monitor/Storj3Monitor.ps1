@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.3"
+$v = "0.7.4"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -126,6 +126,10 @@ $v = "0.7.3"
 #               -   remove deleted column
 #               -   Uptime now meen uptime failed count. Enable uptime monitoring with UptimeThreashold=10 by default.
 #               -   Add Runtime column (display count of hours from node start)
+# v0.7.4   - 20200214
+#               -   Fix Windows powershell compatibility issues
+
+
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
 #               -   Big thanks (10-bottles first), greatings for all versions of this script
@@ -278,10 +282,6 @@ namespace InProcess
             SetJobState(JobState.Stopped);
         }
 
-        public void WaitJob()
-        {
-            _AsyncResult.AsyncWaitHandle.WaitOne();
-        }
         public bool WaitJob(TimeSpan timeout)
         {
             return _AsyncResult.AsyncWaitHandle.WaitOne(timeout);
@@ -558,7 +558,7 @@ function GetJobResultFailSafe {
     param ([System.Collections.Generic.List[[InProcess.InMemoryJob]]] $waitList, $timeoutSec)
     
     $start = [System.DateTimeOffset]::Now
-    $timeoutTry =  [TimeSpan]::FromSeconds($timeoutSec)/$waitList.Count
+    $timeoutTry =  [TimeSpan]::FromSeconds(([double]$timeoutSec) / $waitList.Count) 
     
     while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec)) {
         for($i=$waitList.Count-1; $i -ge 0; $i--)
