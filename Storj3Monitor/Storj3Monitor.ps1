@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.4"
+$v = "0.7.5"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -124,10 +124,15 @@ $v = "0.7.4"
 # v0.7.3   - 20200211
 #               -   fix null call on new satellite, add saltlake satellite
 #               -   remove deleted column
-#               -   Uptime now meen uptime failed count. Enable uptime monitoring with UptimeThreashold=10 by default.
+#               -   Uptime now meen uptime failed count. Enable uptime monitoring with UptimeThreashold=3 by default.
 #               -   Add Runtime column (display count of hours from node start)
 # v0.7.4   - 20200214
 #               -   Fix Windows powershell compatibility issues
+# v0.7.5   - 20200228
+#               -   Fix UptimeFail counter calculation (previous version multiplied by 100 because before it was a percentage)
+#               -   Change default UptimeThreashold from 10 to 3
+#               -   Output sum of uptime failed in node stats
+#               -   Short headers from UptimeFail to UptimeF
 
 
 #TODO-Drink-and-cheers
@@ -445,7 +450,7 @@ function LoadConfig{
     }
 
     if ($null -eq $config.UptimeThreshold) { 
-        $config | Add-Member -NotePropertyName UptimeThreshold -NotePropertyValue 10
+        $config | Add-Member -NotePropertyName UptimeThreshold -NotePropertyValue 3
     }
 
     return $config
@@ -869,7 +874,7 @@ function GetScore
         $node = $nodes | Where-Object {$_.NodeId -eq $nodeId} | Select-Object -First 1
         $node.BwSummary = ($_.Group | Select-Object -ExpandProperty Bandwidth | AggBandwidth2)
         $node.Audit = ($_.Group | Select-Object -ExpandProperty Audit | Measure-Object -Min).Minimum
-        $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Max).Maximum
+        $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Sum).Sum
     }
 
     $score
@@ -1295,7 +1300,7 @@ function DisplayNodes {
         @{n="Runtime"; e={[int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours)}}, `
         @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
         @{n="Audit"; e={Round($_.Audit)}}, `
-#        @{n="Uptime"; e={Round($_.Uptime)}}, `
+        @{n="UptimeF"; e={$_.Uptime}}, `
         @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
         @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
         @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
@@ -1380,12 +1385,12 @@ function DisplayScore {
             'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
 #            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
-            'UptimeFail'    = Round($_.Uptime)
+            'UptimeF'= $_.Uptime
             'Comment'   = "- " + [String]::Join("; ", $comment)
         }
         $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
     }
-    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, UptimeFail, Comment | Out-String -Width 200
+    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, UptimeF, Comment | Out-String -Width 200
 
     Write-Host
 }
