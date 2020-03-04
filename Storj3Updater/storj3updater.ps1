@@ -8,8 +8,9 @@ $v = "0.1"
 
 # Changes:
 # v0.1    - 20200304 Initial version. Download only (no update and service start\stop).
+# v0.1.1  - 20200304 Fix arch detection on linux, small other fixes
 
-
+# INPUT PARAMS ------------------------------------------------------
 $constants = @{
     #target dir for update only (download command write file to current directory)
     target = "/usr/sbin"
@@ -35,6 +36,26 @@ $versionUriTemplate = "https://version.storj.io"
 
 # END OF INPUT PARAMS ------------------------------------------------------
 
+function ExternalCommand 
+{
+    param ($file, $arguments)
+    $temp = $null
+    try
+    {
+        $temp = [System.IO.Path]::GetTempFileName()
+        $p = Start-Process -FilePath $file -ArgumentList $arguments -Wait -PassThru -NoNewWindow -RedirectStandardOutput $temp
+        if (($p.ExitCode -ne 0) -or (-not [System.IO.File]::Exists($temp))) { throw "Failed on external command" }
+
+        $text = [System.IO.File]::ReadAllLines($temp)
+        return $text
+
+    }
+    finally
+    {
+        if ($null -ne $temp -and [System.IO.File]::Exists($temp)) { Remove-Item $temp}
+    }
+}
+
 function Set-Os {
     param($constants)
 
@@ -47,13 +68,20 @@ function Set-Os {
     
     if ($constants.os -eq "Windows_NT") { $constants.os = "Windows" }
     if ([String]::IsNullOrEmpty($constants.os)) { throw "Unknown OS. Please specify it in constants in script body" }
+
+    if ([String]::IsNullOrEmpty($constants.arch)) { $constants.arch = $env:PROCESSOR_ARCHITECTURE }
+    if ([String]::IsNullOrEmpty($constants.arch) -and $IsLinux) {
+        $constants.arch = ExternalCommand -file "uname" -arguments "-i"
+        if ($constants.arch -eq "x86_64") { $constants.arch = "amd64" }
+    }
+
+    if ([String]::IsNullOrEmpty($constants.arch)) { throw "Unknown architecture. Please specify it in constants in script body" }
 }
 
 function GetConstants {
     param($constants, $cmdlineArgs)
     Set-Os -constants $constants
 
-    if ([String]::IsNullOrEmpty($constants.arch)) { $constants.arch = $env:PROCESSOR_ARCHITECTURE }
     if ([String]::IsNullOrEmpty($constants.target)) { $constants.target = Get-Location }
 
     if ($cmdlineArgs.Length -gt 0) { $constants.command = $cmdlineArgs[0] }
@@ -214,7 +242,7 @@ function GetCloudVersion
 function GetBinFileName
 {
     param ($constants)
-    if ($constants["os"].Contains("windows")) { $name = $constants.binary_name + ".exe" }
+    if ($constants.os.ToLowerInvariant().Contains("windows")) { $name = $constants.binary_name + ".exe" }
     else { $name = $constants.binary_name }
     return $name
 }
@@ -234,35 +262,20 @@ function GetBinFile
     return $sourceBin
 }
 
-
-
 function GetBinVersion
 {
     param ($file)
-    $temp = $null
-    try
-    {
-        $temp = [System.IO.Path]::GetTempFileName()
-        $p = Start-Process -FilePath $file -ArgumentList "version" -Wait -PassThru -NoNewWindow -RedirectStandardOutput $temp
-        if (($p.ExitCode -ne 0) -or (-not [System.IO.File]::Exists($temp))) { throw "Bad binary" }
 
-        $text = [System.IO.File]::ReadAllLines($temp)
-        Write-Host ("File version {0}: " -f $file) -NoNewline
-        Write-Host $text
+    $text = ExternalCommand -file $file -arguments "version"
+    Write-Host ("File version {0}: " -f $file) -NoNewline
+    Write-Host $text
 
-        $vstr = ($text | Where-Object {$_.StartsWith("Version:")} | Select-Object -First 1)
-        if ([String]::IsNullOrEmpty($vstr)) { throw "Can't get binary version" }
+    $vstr = ($text | Where-Object {$_.StartsWith("Version:")} | Select-Object -First 1)
+    if ([String]::IsNullOrEmpty($vstr)) { throw "Can't get binary version" }
 
-        $v = $vstr.Substring(8).Trim().TrimStart('v').Trim()
-        if ([String]::IsNullOrEmpty($v)) { throw "Can't get binary version from version string" }
-        return $v
-
-    }
-    finally
-    {
-        if ($null -ne $temp -and [System.IO.File]::Exists($temp)) { Remove-Item $temp}
-    }
-   
+    $v = $vstr.Substring(8).Trim().TrimStart('v').Trim()
+    if ([String]::IsNullOrEmpty($v)) { throw "Can't get binary version from version string" }
+    return $v
 }
 
 function NativeUpdate
@@ -282,7 +295,7 @@ function NativeUpdate
         try {
             Invoke-WebRequest -Uri $uri -OutFile $sourceZip
         }
-        catch [System.Net.WebException] {
+        catch {
             if ($_.Exception.Response.StatusCode -eq "NotFound") {
                 Write-Host ("Native updater not found image for {0}/{1}" -f $constants.os, $constants.arch)
                 return $null
@@ -439,6 +452,7 @@ Preamble
 $constants = GetConstants -constants $constants -cmdlineArgs $args
 if ($constants.command -eq "version") {
     Write-Host ("Script version {0}" -f $v)
+    Write-Host ("System {0}/{1}" -f $constants.os, $constants.arch)
     $bin = GetBinFile -constants $constants 
     GetBinVersion -file $bin
     $cloud = GetCloudVersion
