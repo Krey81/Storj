@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.5"
+$v = "0.7.6"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -133,7 +133,10 @@ $v = "0.7.5"
 #               -   Change default UptimeThreashold from 10 to 3
 #               -   Output sum of uptime failed in node stats
 #               -   Short headers from UptimeFail to UptimeF
-
+# v0.7.6   - 20200305
+#               -   fix monitor issue when offline nodes replaced with last online in monitor loop
+#               -   add "node back online" notice
+#               -   add "node updated" notice (for work with new Storj3Updater script)
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -980,10 +983,12 @@ function CheckNodes{
         #restore old values
         $id = $_.nodeID
         $old = $oldNodes | Where-Object {$_.nodeID -eq $id } | Select-Object -First 1
-        if ($null -ne $old) { 
-            $_.LastPingWarningValue = $old.LastPingWarningValue 
-            $_.LastVerWarningValue = $old.LastVerWarningValue
+        if ($null -eq $old) { 
+            Write-Output ("Node {0} back online" -f $_.Name) | Tee-Object -Append -FilePath $body
+            return 
         }
+        $_.LastPingWarningValue = $old.LastPingWarningValue 
+        $_.LastVerWarningValue = $old.LastVerWarningValue
 
         $lostMin = [int](([DateTimeOffset]::Now - $_.lastPinged).TotalMinutes)
         if (($_.LastPingWarningValue -eq 0) -and ($lostMin -ge $config.LastPingWarningMinutes)) {
@@ -1002,6 +1007,10 @@ function CheckNodes{
                     $_.LastVerWarningValue = $_.LastVersion
                 }
             }
+        }
+
+        if ($_.version -ne $old.version) {
+            Write-Output ("Node {0} updated from {1} to {2}" -f $_.Name, $old.version, $_.version) | Tee-Object -Append -FilePath $body
         }
     }
     $oldNodesRef.Value = $newNodes
