@@ -1,6 +1,6 @@
 <h1>Storj3Updater</h1>
 
-This script is designed to update the sotoragenode binary file from two sources
+This script is designed to update the storagenode binary file from two sources
 1. From links provided by version.storj.io
 2. From docker images on hub.docker.com
 
