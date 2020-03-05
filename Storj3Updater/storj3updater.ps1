@@ -4,27 +4,65 @@
 # 2. From docker storagenode docker images on hub.docker.com
 # https://github.com/Krey81/Storj
 
-$v = "0.1"
+$v = "0.1.2"
 
 # Changes:
-# v0.1    - 20200304 Initial version. Download only (no update and service start\stop).
-# v0.1.1  - 20200304 Fix arch detection on linux, small other fixes
+# v0.1      - 20200304 Initial version. Download only (no update and service start\stop).
+# v0.1.1    - 20200304 Fix arch detection on linux, small other fixes
+# v0.1.2    - 20200305
+#           - Fix arch armv7l detection on linux
+#           - Check cloud url for suggested version match
+#           - Caching docker image digest to prevent unneeded downloads
+#           - Systemd integration for automatic start and stop nodes during update
+#           - other bug fixes
+#           - add some constants and descriptions
 
 # INPUT PARAMS ------------------------------------------------------
 $constants = @{
-    #target dir for update only (download command write file to current directory)
-    target = "/usr/sbin"
-    os = ""
-    arch = ""
+    #target dir path for update only (download command write file to current directory)
+    target = "/usr/sbin";
+
+    #os type: windows, linux. Script will try to autodetect it
+    os = "";
+
+    #platform architecture: amd64, arm64, armv6 etc. Script will try to autodetect it
+    arch = "";
+
+    #DEBUG
+    #target = "C:\Projects\Repos\Storj"
+    #os = "linux"
+    #arch = "amd64"
+
+    #storagenode image name on docker hub
     image = "storjlabs/storagenode";
+
+    #image tag on docker hub
     tag="beta";
-    digest="";
+
+    #dir for temp files. Script will try to autodetect it
     temp_path="";
+    
+    #subdirectory in temp directory for script
     temp_path_dir="storj-blob";
+
+    #subdirectory in temp_path_dir for extraction fs from docker images
     temp_path_dir_fs="fs";
+
+    #file name within temp_path for caching values between runs
+    mem_file = "Storj3Updater_mem";
+
+    #storagenode binary name. For windows script add ".exe" to it
     binary_name="storagenode"
+
+    #if true script will stoping systemd services before update and start it after update
+    systemd_integration = $false
+    #system service name search pattern. I named my services like storj-node02
+    service_pattern = "storj-node??.service";
+
+    #other runtime values (do not fill it)
+    digest="";
     command="";
-    method="auto"
+    method="auto";
 }
 
 # uri templates for external API queries
@@ -71,8 +109,9 @@ function Set-Os {
 
     if ([String]::IsNullOrEmpty($constants.arch)) { $constants.arch = $env:PROCESSOR_ARCHITECTURE }
     if ([String]::IsNullOrEmpty($constants.arch) -and $IsLinux) {
-        $constants.arch = ExternalCommand -file "uname" -arguments "-i"
+        $constants.arch = ExternalCommand -file "uname" -arguments "-m"
         if ($constants.arch -eq "x86_64") { $constants.arch = "amd64" }
+        elseif ($constants.arch -eq "armv7l") { $constants.arch = "arm64" }
     }
 
     if ([String]::IsNullOrEmpty($constants.arch)) { throw "Unknown architecture. Please specify it in constants in script body" }
@@ -144,6 +183,13 @@ function IsNeedNewToken
     }
 }
 
+function GetDate
+{
+    param($value)
+    if ($value.GetType().Name -eq "String") { $value = [DateTimeOffset]::Parse($value)}
+    elseif ($value.GetType().Name -eq "DateTime") { $value = [ DateTimeOffset]$value }
+    return $value
+}
 
 function GetImage 
 {
@@ -156,12 +202,30 @@ function GetImage
         return $null
     }
     else {
-        Write-Host -ForegroundColor Green ("Docker updater found image {0} bytes for {1}, updated {2} ({3} days ago)" -f 
+        $binDate = $images.last_updated
+        Write-Host -ForegroundColor Green ("Docker updater found image {0} bytes for {1}, updated {2:yyyy.MM.dd HH:mm:ss (UTCzzz)} ({3} days ago)" -f 
             $platformImage.size, 
             ($constants.os + "/" + $constants.arch), 
-            $images.last_updated, 
-            [int]([DateTimeOffset]::Now - [DateTimeOffset]::Parse($images.last_updated)).TotalDays
+            $binDate, 
+            [int]([DateTimeOffset]::Now - $binDate).TotalDays
         )
+
+        #recall old digest
+        $memFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), $constants.mem_file)
+        $lastDigest = ""
+        if ([System.IO.File]::Exists($memFile)) {
+            $memLines = [System.IO.File]::ReadAllLines($memFile)
+            if ($memLines.Length -gt 0) { $lastDigest = $memLines[$memLines.Length - 1] }
+        }
+
+        if (-not [String]::IsNullOrEmpty($lastDigest) -and $platformImage.digest -eq $lastDigest) {
+            Write-Host "image has already been downloaded before. ignoring."
+            return $null
+        }
+        else {
+            [System.IO.File]::AppendAllText($memFile, $platformImage.digest)
+            Write-Host ("docker image digest added to {0}" -f $memFile)
+        }
         return $platformImage
     }
 }
@@ -210,21 +274,10 @@ function TempDir
 # check and write sourceBin to target
 function UpdateBin 
 {
-    param ($sourceBin, $target)
+    param ($sourceBin, $targetBin)
     if ([System.IO.File]::Exists($sourceBin)) {
         Write-Host "Downloaded" 
-        $targetBin = $null
-        try
-        {
-            $name = [System.IO.Path]::GetFileName($sourceBin)
-            $targetBin = [System.IO.Path]::Combine($target, $name)
-            Copy-Item $sourceBin -Destination $targetBin
-        }
-        catch 
-        {
-            $targetBin = [System.IO.Path]::Combine($target, "storagenode.new")
-            Copy-Item $sourceBin -Destination $targetBin
-        }
+        Copy-Item $sourceBin -Destination $targetBin
         if ($null -ne $targetBin -and [System.IO.File]::Exists($targetBin)) { Write-Host ("copied to {0}" -f $targetBin) }
         else { throw "copy failed" }
         return $targetBin
@@ -241,24 +294,23 @@ function GetCloudVersion
 #return target platform file name with extension
 function GetBinFileName
 {
-    param ($constants)
-    if ($constants.os.ToLowerInvariant().Contains("windows")) { $name = $constants.binary_name + ".exe" }
-    else { $name = $constants.binary_name }
+    param ($constants, $suffix)
+    if ($null -eq $suffix) { $suffix = "" }
+    if ($constants.os.ToLowerInvariant().Contains("windows")) { $name = $constants.binary_name + $suffix + ".exe" }
+    else { $name = $constants.binary_name + $suffix }
     return $name
 }
 
 
 function GetBinFile
 {
-    param ($constants)
+    param ($constants, $suffix)
     if ($null -eq $constants -or $null -eq $constants.target) { throw "bad params target" }
     if (-not [System.IO.Directory]::Exists($constants.target)) { throw "bad params target not exists" }
 
-    $sourceBin = GetBinFileName -constants $constants
+    $sourceBin = GetBinFileName -constants $constants -suffix $suffix
     $sourceBin = [System.IO.Path]::Combine($constants.target, $sourceBin)
 
-
-    if (-not [System.IO.File]::Exists($sourceBin)) { throw ("bad params target file {0} not exists" -f $sourceBin) }
     return $sourceBin
 }
 
@@ -280,7 +332,7 @@ function GetBinVersion
 
 function NativeUpdate
 {
-    param ($uriTemplate, $constants)
+    param ($uriTemplate, $constants, $targetBin)
 
     #version url                                                                                     
     #0.33.4  https://github.com/storj/storj/releases/download/v0.33.4/storagenode_{os}_{arch}.exe.zip
@@ -309,7 +361,8 @@ function NativeUpdate
         $sourceName = GetBinFileName -constants $constants
         $sourceBin = [System.IO.Path]::Combine($temp.temp_storj_fs, $sourceName)
 
-        return UpdateBin -sourceBin $sourceBin -target $constants.target
+        if ($null -eq $targetBin) { $targetBin = [System.IO.Path]::Combine($constants.target, $sourceName) }
+        return UpdateBin -sourceBin $sourceBin -target $targetBin
     }
     finally
     {
@@ -319,7 +372,7 @@ function NativeUpdate
 
 function DockerUpdate
 {
-    param ($token, $constants)
+    param ($token, $constants, $targetBin)
 
     if (IsNeedNewToken -token $token) {
         Write-Host -ForegroundColor Green "Autorization..."
@@ -342,12 +395,13 @@ function DockerUpdate
             Write-Host ("Download {0}" -f $tempfile)
             $constants["digest"] = $_.digest
             $uri = GetUri -template $blobUriTemplate -constants $constants
-            Invoke-Webrequest -Headers @{Authorization="Bearer " + $token.token} -Method GET -Uri $uri -OutFile $tempfile -ErrorAction Stop
-	        Start-Process -FilePath "tar" -ArgumentList ("-x", "-k", "-z", "-f " + $tempfile, "-C fs", "app/storagenode") -Wait -PassThru -NoNewWindow
+            Invoke-Webrequest -Headers @{Authorization="Bearer " + $token.token} -Method GET -Uri $uri -OutFile $tempfile -ErrorAction Stop | Out-Null
+	        Start-Process -FilePath "tar" -ArgumentList ("-x", "-k", "-z", "-f " + $tempfile, "-C fs", "app/storagenode") -Wait -PassThru -NoNewWindow | Out-Null
         }
 
         $sourceBin = [System.IO.Path]::Combine($temp.temp_storj, "fs", "app", "storagenode")
-        return UpdateBin -sourceBin $sourceBin -target $constants.target
+        if ($null -eq $targetBin) { $targetBin = [System.IO.Path]::Combine($constants.target,"storagenode") }
+        return UpdateBin -sourceBin $sourceBin -target $targetBin
     }
     finally
     {
@@ -406,6 +460,44 @@ function Download
     }
 }
 
+function CheckUpdate 
+{
+    param($file, $expected)
+    if ([String]::IsNullOrEmpty($file)) {return $false}
+    elseif (-not [System.IO.File]::Exists($file)) { return $false }
+
+    $version = GetBinVersion -file $file
+    if ((CompareVersion -v1 $version -v2 $expected) -ne 0) { 
+        Write-Host ("downloaded binary have the other version than expected ({0})" -f $version)
+        return $false 
+    }
+    return $true
+}
+
+function SystemdAction{
+    param ($constants, [string[]]$services, [string]$action)
+    $services | ForEach-Object {
+        $service = $_
+        Write-Host ("{0}ing {1}" -f $action, $service)
+        ExternalCommand -file "systemctl" -arguments ($action, $service) | Out-Null
+    }
+}
+
+function SystemdListServices {
+    param ($constants)
+    #root@ovh-arm:/etc/scripts# systemctl -o json-pretty list-units storj-node??.service --state active --plain --no-pager --no-legend
+    #storj-node11.service loaded active running Storagenode-11 service
+    $services = New-Object System.Collections.Specialized.StringCollection   
+    $text = ExternalCommand -file "systemctl" -arguments ("list-units", $constants.service_pattern, "--state active", "--plain", "--no-pager", "--no-legend")
+    $text | ForEach-Object {
+        if (![String]::IsNullOrEmpty($_)) {
+            $parts = $_.Split(" ")
+            $services.Add($parts[0].Trim()) | Out-Null
+        }
+    }
+    return $services
+}
+
 function Update 
 {
     param ($constants)
@@ -414,35 +506,66 @@ function Update
     $localVersion = GetBinVersion -file $file
     $cloudVersion = GetCloudVersion
     Write-Host ("Cloud version is {0}, local file version is {1}" -f $cloudVersion.version, $localVersion)
-    if ((CompareVersion -v1 $localVersion -v2 $cloudVersion) -eq 0)
+    if ((CompareVersion -v1 $localVersion -v2 $cloudVersion.version) -eq 0)
     {
         Write-Host -ForegroundColor Green "Versions are equal. Exiting."
         return
     }
 
-    if (($constants.method -eq "native") -or ($constants.method -eq "auto")) {
-        $file = NativeUpdate -uriTemplate $cloudVersion.url -constants $constants
-        if (-not [String]::IsNullOrEmpty($file))
-        {
-            Write-Host -ForegroundColor Green "Updated"
-            return
-        }
-    }
+    $tempBin = GetBinFile -constants $constants -suffix "_temp"
+    $updated = $false
 
-    if (($constants.method -eq "docker") -or ($constants.method -eq "auto")) {
-        $image = GetImage -constants $constants
-        if ($null -ne $image) {
-            $constants.digest = $image.digest
-            $file = DockerUpdate -constants $constants
-            if (-not [String]::IsNullOrEmpty($file))
-            {
-                Write-Host -ForegroundColor Green "Updated"
-                return
+    try {
+        if ([System.IO.File]::Exists($tempBin)) { Remove-Item $tempBin }
+        if (($constants.method -eq "native") -or ($constants.method -eq "auto")) {
+            if (-not $cloudVersion.url.Contains($cloudVersion.version)) { Write-Host -ForegroundColor Red ("Bad version url {0}, ignoring native updater" -f $cloudVersion.url) }
+            else {
+                $file = NativeUpdate -uriTemplate $cloudVersion.url -constants $constants -targetBin $tempBin
+                $updated = CheckUpdate -file $file -expected $cloudVersion.version
             }
         }
+
+        if (-not $updated -and (($constants.method -eq "docker") -or ($constants.method -eq "auto"))) {
+            $image = GetImage -constants $constants
+            if ($null -ne $image) {
+                $constants.digest = $image.digest
+                $file = DockerUpdate -constants $constants -targetBin $tempBin
+                $updated = CheckUpdate -file $file -expected $cloudVersion.version
+            }
+        }
+    }        
+    catch {
+        Write-Error $_.Exception.Message
+        $updated = $false
     }
 
-    Write-Host -ForegroundColor Red "Update failed"
+    if (-not $updated)
+    {
+        Write-Host -ForegroundColor Red "Update failed"
+        return
+    }
+
+    $services = $null
+    try {
+        if ($constants.systemd_integration) {
+            Write-Host "Get active services"
+            $services = SystemdListServices -constants $constants
+            Write-Host ("Found {0} active services" -f $services.Count)
+
+            SystemdAction -constants $constants -services $services -action "stop"
+        }
+
+        $sourceName = GetBinFileName -constants $constants
+        $targetBin = [System.IO.Path]::Combine($constants.target, $sourceName) 
+        if ([System.IO.File]::Exists($targetBin)) { Remove-Item $targetBin }
+        Move-Item -Path $tempBin -Destination $targetBin
+    }
+    finally{
+        if ($constants.systemd_integration -and ($null -ne $services) -and ($services.Count -gt 0)) {
+            Write-Host "Starting services"
+            SystemdAction -constants $constants -services $services -action "start"
+        }
+    }
 }
 
 #PROGRAM BODY
@@ -450,6 +573,7 @@ Preamble
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $constants = GetConstants -constants $constants -cmdlineArgs $args
+
 if ($constants.command -eq "version") {
     Write-Host ("Script version {0}" -f $v)
     Write-Host ("System {0}/{1}" -f $constants.os, $constants.arch)
@@ -465,5 +589,11 @@ else{
     Write-Host "storj3updater version"
     Write-Host "storj3updater download -m [auto|docker|native]"
     Write-Host "storj3updater update -m [auto|docker|native]"
+    Write-Host
+    Write-Host "For automatic updates set systemd_integration to true, check service_pattern and add command to cron"
+    Write-Host "cron line example for every hour updates:"
+    Write-Host "`t15 * * * * /usr/bin/pwsh /etc/scripts/Storj3Updater.ps1 update 2>&1 >>/var/log/storj/updater.log"
+    Write-Host "`t- Be sure to change 15 minutes to something else so as not to create peak loads on the update servers"
+
 }
 
