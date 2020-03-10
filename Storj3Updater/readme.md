@@ -29,7 +29,7 @@ curl -OL https://github.com/Krey81/Storj/raw/master/Storj3Updater/storj3updater.
 </pre>
 3. Enable systemd integration in script
 <pre>
-nano storj3updater
+nano storj3updater.ps1
 find line systemd_integration = $false and change $false to $true
 </pre> 
 4. Download storj binary 
