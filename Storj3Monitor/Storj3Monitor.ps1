@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.8.0"
+$v = "0.8.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -140,6 +140,8 @@ $v = "0.8.0"
 # v0.8.0   - 20200310 
 #               -   add etherscan.io integration
 #               -   add parameter -p
+# v0.8.1   - 20200310 
+#               -   add transaction count to payouts output
 
 
 #TODO-Drink-and-cheers
@@ -1673,15 +1675,16 @@ function DisplayPayout {
 
     #Output
     $byMonthOutput = $byMonth | ForEach-Object {
-        $sum = ($_.Group | Measure-Object -Sum -Property value).Sum
+        $sum = ($_.Group | Measure-Object -Sum -Property value)
         $p = @{
                 'Date'  = [String]::Format("{0:yyyy MMMM}", $_.Values[0].date)
-                'Sum'   = [String]::Format("{0:0.00}" -f $sum)
+                'Sum'   = [String]::Format("{0:0.00}" -f $sum.Sum)
+                'Tcount'= $sum.Count
         }
         Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
     }
 
-    $byMonthOutput | Format-Table Date, Sum
+    $byMonthOutput | Format-Table Date, Sum, Tcount
     Write-Host ("Total {0:0.00} Storj for {1} months, {2} transactions" -f $total.Sum, $byMonth.Values.Count, $total.Count)
 }
 
