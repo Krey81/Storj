@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.7.6"
+$v = "0.8.0"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -137,6 +137,10 @@ $v = "0.7.6"
 #               -   fix monitor issue when offline nodes replaced with last online in monitor loop
 #               -   add "node back online" notice
 #               -   add "node updated" notice (for work with new Storj3Updater script)
+# v0.8.0   - 20200310 
+#               -   add etherscan.io integration
+#               -   add parameter -p
+
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -158,14 +162,18 @@ $v = "0.7.6"
 #
 #
 #   Display only for specefied nodes
-#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress] [-node name] [-np]
+#       pwsh ./Storj3Monitor.ps1 -c <config-file> [ingress|egress] [-node name] [-np] [-p <num>|year|all]
 #
 #
 #      Where 
 #           ingress     - only ingress traffic
 #           egress      - only egress traffic
-#           node        - filter output to that node
-#           np          - no parallel execution
+#           -node       - filter output to that node
+#           -np         - no parallel execution
+#           -p          - show payments from etherscan.io; 
+#                       - num  - count of last months
+#                       - year - current year
+#                       - all  - all available transactons
 #   
 #   Test config and mail sender
 #       pwsh ./Storj3Monitor.ps1 -c <config-file> testmail
@@ -401,7 +409,6 @@ function DefaultConfig{
 function LoadConfig{
     param ($cmdlineArgs)
     $idx = $cmdlineArgs.IndexOf("-c")
-    
 
     if ($idx -lt 0 -or ($cmdlineArgs.Length -le ($idx + 1)) ) {
         Write-Host -ForegroundColor Red "Please specify config file"
@@ -454,6 +461,34 @@ function LoadConfig{
 
     if ($null -eq $config.UptimeThreshold) { 
         $config | Add-Member -NotePropertyName UptimeThreshold -NotePropertyValue 3
+    }
+
+    $config | Add-Member -NotePropertyName Payout -NotePropertyValue $null
+    $idx = $cmdlineArgs.IndexOf("-p")
+    if ($idx -gt 0) {
+
+        # PLEASE setup you own API key: Register on etherscan.io and create API-KEY in you profile, 
+        # add it to config like "EtherscanKey": "you-key"
+        # if this is not done beginners will suffer 
+        # if you read this, then you are not a beginner, so just do it, use a you own API-KEY
+
+        # api key for Storj3Monitor FOR ALL newbies
+        if ($null -eq $config.EtherscanKey) { 
+            $config | Add-Member -NotePropertyName EtherscanKey -NotePropertyValue "938G2GAQP1TZGU5JYEQ9JHUEQ7J39NINM4"
+            Write-Host -ForegroundColor Red ("Etherscan.io quering with newbies API-KEY. Please setup you own key !!!")
+        } 
+
+        [int]$payout = 2
+        if (($cmdlineArgs.Length - 1) -gt $idx)
+        {
+            $pstr = $cmdlineArgs[$idx + 1]
+            if (-not [int]::TryParse($pstr, [ref]$payout)) {
+                if ($pstr -eq "year") { $payout = [System.DateTimeOffset]::Now.Month }
+                elseif ($pstr -eq "all") { $payout = -1 }
+                else { throw "bad -p (payment) parameter. Expected <num> of months or 'year' or 'all'"}
+            }
+        }
+        $config.Payout = $payout
     }
 
     return $config
@@ -1587,6 +1622,69 @@ function DisplayTraffic {
 
 }
 
+function GetFirstDate
+{
+    param($date)
+    return New-Object DateTimeOffset((New-Object DateTime($date.Year, $date.Month, 1)), [TimeSpan]::Zero)
+}
+
+function DisplayPayout {
+    param ($nodes, $config)
+    if ($null -eq $config.EtherscanKey) { thow "No EtherscanKey given in config. This is etherscan.io API key. Please got it."}
+
+    if ($null -eq $config.Payout) { throw "No payouts queried" }
+    elseif ($config.Payout -eq 0) { Write-Host "Payouts for current month:" }
+    elseif ($config.Payout -eq -1) { Write-Host "Payouts all:" }
+    else { Write-Host ("Payouts for last {0} months:" -f $config.Payout) }
+    Write-Host
+
+    $ethScanUrlTemplate = ("http://api.etherscan.io/api?module=account&action=tokentx&address=[address]&startblock=0&endblock=999999999&sort=asc&apikey={0}" -f $config.EtherscanKey)
+    $addresses = $nodes | Select-Object -ExpandProperty wallet -Unique
+    if (($null -eq $addresses) -or ($addresses.Count -eq 0) ) { thow "Fail to get wallet addresses from nodes"}
+
+    $storj = $null
+    $addresses | ForEach-Object {
+        $address = $_
+        $ethScanUrl = $ethScanUrlTemplate.Replace("[address]", $address)
+        Write-Host ("Quering {0}" -f $address)
+
+        $tnx = Invoke-WebRequest -Method Get -Uri $ethScanUrl | ConvertFrom-Json
+        if ($tnx.message -ne "OK") {
+            throw ("Error getting eth transactions: {0}" -f $tnx.message)
+        }
+
+        $tnx = $tnx.result | Where-Object {$_.tokenSymbol -eq "STORJ" -and $_.to -eq $address } | Select-Object -Property `
+            @{name='from'; expression={$_.from}}, `
+            @{name='date'; expression={[DateTimeOffset]::FromUnixTimeSeconds($_.timestamp)}}, `
+            @{name='value'; expression={($_.value / ([Math]::Pow(10, $_.tokenDecimal)))}}
+        if ($null -eq $storj) { $storj = $tnx }
+        else { $storj = $storj += $tnx }
+    }
+
+    $storjFiltered = $null
+    if ($config.Payout -eq 0) { $storjFiltered = $storj | Where-Object {$_.date -ge (GetFirstDate -date ([DateTimeOffset]::Now))} }
+    elseif ($config.Payout -gt 0) { $storjFiltered = $storj | Where-Object {$_.date -ge (GetFirstDate -date ([DateTimeOffset]::Now.AddMonths(($config.Payout * -1) + 1)))} }
+    elseif ($config.Payout -eq -1) { $storjFiltered = $storj }
+    else { throw "bad param -p (Payout)" }
+    
+
+    $total =  $storjFiltered | Measure-Object -Sum -Property value
+    $byMonth = $storjFiltered | Group-Object -Property {GetFirstDate -date $_.date}
+
+    #Output
+    $byMonthOutput = $byMonth | ForEach-Object {
+        $sum = ($_.Group | Measure-Object -Sum -Property value).Sum
+        $p = @{
+                'Date'  = [String]::Format("{0:yyyy MMMM}", $_.Values[0].date)
+                'Sum'   = [String]::Format("{0:0.00}" -f $sum)
+        }
+        Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
+    }
+
+    $byMonthOutput | Format-Table Date, Sum
+    Write-Host ("Total {0:0.00} Storj for {1} months, {2} transactions" -f $total.Sum, $byMonth.Values.Count, $total.Count)
+}
+
 function GetQuery {
     param($cmdlineArgs)
 
@@ -1632,7 +1730,7 @@ if ($args.Contains("example")) {
 
 $config = LoadConfig -cmdlineArgs $args
 #DEBUG
-#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Krey.conf"
+#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Krey.conf", "-p"
 
 if (-not $config) { return }
 
@@ -1668,9 +1766,13 @@ elseif ($nodes.Count -gt 0) {
         DisplayScore -score $score -bwsummary $bwsummary
     }
     DisplayNodes -nodes $nodes -bwsummary $bwsummary -config $config
+    Write-Host
+
+    if ($null -ne $config.Payout) { DisplayPayout -nodes $nodes -config $config }
+
     Write-Host ("Data collect time {0}s" -f ($query.EndData - $query.StartData).TotalSeconds)
 }
 
 #DEBUG
 #cd C:\Projects\Repos\Storj
-#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Krey.conf
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Krey.conf -p
