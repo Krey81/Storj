@@ -4,7 +4,7 @@
 # 2. From docker storagenode docker images on hub.docker.com
 # https://github.com/Krey81/Storj
 
-$v = "0.1.2"
+$v = "0.1.3"
 
 # Changes:
 # v0.1      - 20200304 Initial version. Download only (no update and service start\stop).
@@ -16,6 +16,7 @@ $v = "0.1.2"
 #           - Systemd integration for automatic start and stop nodes during update
 #           - other bug fixes
 #           - add some constants and descriptions
+# v0.1.3    - 20200318 Fix caching docker image
 
 # INPUT PARAMS ------------------------------------------------------
 $constants = @{
@@ -223,7 +224,7 @@ function GetImage
             return $null
         }
         else {
-            [System.IO.File]::AppendAllText($memFile, $platformImage.digest)
+            [System.IO.File]::AppendAllLines($memFile, [string[]]$platformImage.digest)
             Write-Host ("docker image digest added to {0}" -f $memFile)
         }
         return $platformImage
