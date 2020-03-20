@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.8.1"
+$v = "0.8.2"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -142,6 +142,8 @@ $v = "0.8.1"
 #               -   add parameter -p
 # v0.8.1   - 20200310 
 #               -   add transaction count to payouts output
+# v0.8.2   - 20200320 
+#               -   new api endpoints
 
 
 #TODO-Drink-and-cheers
@@ -501,14 +503,14 @@ function GetJson
     param($uri, $timeout)
 
     #RAW
-    # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/dashboard).content | ConvertFrom-Json).data
-    # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json).data
+    # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/sno).content | ConvertFrom-Json)
+    # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json)
 
     $resp = Invoke-WebRequest -Uri $uri -TimeoutSec $timeout
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
     $json = ConvertFrom-Json $resp.Content
     if (-not [System.String]::IsNullOrEmpty($json.Error)) { throw $json.Error }
-    else { $json = $json.data }
+    #else { $json = $json.data }
     return $json
 }
 
@@ -629,7 +631,7 @@ function QueryNode
 
     try {
         if ($null -eq $config) {Write-Error "Bad config in QueryNode"}
-        $dash = GetJson -uri ("http://{0}/api/dashboard" -f $address) -timeout $timeoutSec
+        $dash = GetJson -uri ("http://{0}/api/sno" -f $address) -timeout $timeoutSec
 
         $name = GetNodeName -config $config -id $dash.nodeID
         if ($null -ne $query.Node) {
@@ -654,10 +656,10 @@ function QueryNode
             $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
             $dash.satellites | ForEach-Object {
                 $satid = $_.id
-                $job = StartWebRequest -Name "SatQueryJob" -Address ("http://{0}/api/satellite/{1}" -f $address, $satid) -Timeout $timeoutSec
+                $job = StartWebRequest -Name "SatQueryJob" -Address ("http://{0}/api/sno/satellite/{1}" -f $address, $satid) -Timeout $timeoutSec
                 $waitList.Add($job)
             }
-            GetJobResultFailSafe -waitList $waitList -timeoutSec $timeoutSec | ForEach-Object { $satResult.Add($_.data) }
+            GetJobResultFailSafe -waitList $waitList -timeoutSec $timeoutSec | ForEach-Object { $satResult.Add($_) }
         }
         else {
             $dash.satellites | ForEach-Object {
@@ -665,7 +667,7 @@ function QueryNode
                 try 
                 {
                     Write-Host -NoNewline ("query {0}..." -f $address)
-                    $sat = GetJson -uri ("http://{0}/api/satellite/{1}" -f $address, $satid) -timeout $timeoutSec
+                    $sat = GetJson -uri ("http://{0}/api/sno/satellite/{1}" -f $address, $satid) -timeout $timeoutSec
                     $satResult.Add($sat)
                     Write-Host "completed"
                 }
