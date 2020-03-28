@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.8.2"
+$v = "0.8.3"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -144,6 +144,9 @@ $v = "0.8.2"
 #               -   add transaction count to payouts output
 # v0.8.2   - 20200320 
 #               -   new api endpoints
+# v0.8.3   - 20200328
+#               -   add debug messages for satellite timeout
+#               -   add TimeoutSec config option
 
 
 #TODO-Drink-and-cheers
@@ -467,6 +470,10 @@ function LoadConfig{
         $config | Add-Member -NotePropertyName UptimeThreshold -NotePropertyValue 3
     }
 
+    if ($null -eq $config.TimeoutSec) { 
+        $config | Add-Member -NotePropertyName TimeoutSec -NotePropertyValue 20
+    }
+
     $config | Add-Member -NotePropertyName Payout -NotePropertyValue $null
     $idx = $cmdlineArgs.IndexOf("-p")
     if ($idx -gt 0) {
@@ -605,7 +612,7 @@ function GetJobResultFailSafe {
     param ([System.Collections.Generic.List[[InProcess.InMemoryJob]]] $waitList, $timeoutSec)
     
     $start = [System.DateTimeOffset]::Now
-    $timeoutTry =  [TimeSpan]::FromSeconds(([double]$timeoutSec) / $waitList.Count) 
+    $timeoutTry =  [TimeSpan]::FromSeconds(([double]$timeoutSec) / ($waitList.Count + 1)) 
     
     while (($waitList.Count -gt 0) -and (([System.DateTimeOffset]::Now - $start).TotalSeconds -le $timeoutSec)) {
         for($i=$waitList.Count-1; $i -ge 0; $i--)
@@ -613,7 +620,12 @@ function GetJobResultFailSafe {
             $job = $waitList[$i]
             if ($job.WaitJob($timeoutTry)) {
                 $waitList.Remove($job) | Out-Null
-                if ($job.Error.Count -gt 0 ) { Write-Error $job.Error[0] -ErrorAction Continue }
+                if ($job.Error.Count -gt 0 ) { 
+                    if ($job.Error[0].Exception.Message -match "operation was canceled") { 
+                        Write-Error ("timeout canceled {0}" -f $job.Name) -ErrorAction Continue 
+                    }
+                    else { Write-Error $job.Error[0] -ErrorAction Continue }
+                }
                 elseif( $job.Output.Count -eq 1 ) { Write-Output $job.Output[0] }
                 else { Write-Error ("Bad output from {0}" -f $_.Name) -ErrorAction Continue }
             }
@@ -627,11 +639,10 @@ function GetJobResultFailSafe {
 function QueryNode
 {
     param($address, $config, $query)
-    $timeoutSec = 30
 
     try {
         if ($null -eq $config) {Write-Error "Bad config in QueryNode"}
-        $dash = GetJson -uri ("http://{0}/api/sno" -f $address) -timeout $timeoutSec
+        $dash = GetJson -uri ("http://{0}/api/sno" -f $address) -timeout $config.TimeoutSec
 
         $name = GetNodeName -config $config -id $dash.nodeID
         if ($null -ne $query.Node) {
@@ -656,23 +667,27 @@ function QueryNode
             $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
             $dash.satellites | ForEach-Object {
                 $satid = $_.id
-                $job = StartWebRequest -Name "SatQueryJob" -Address ("http://{0}/api/sno/satellite/{1}" -f $address, $satid) -Timeout $timeoutSec
+                $job = StartWebRequest -Name ("SatQueryJob node {0}, sat {1}" -f $name, $satid) -Address ("http://{0}/api/sno/satellite/{1}" -f $address, $satid) -Timeout $config.TimeoutSec
                 $waitList.Add($job)
             }
-            GetJobResultFailSafe -waitList $waitList -timeoutSec $timeoutSec | ForEach-Object { $satResult.Add($_) }
+            GetJobResultFailSafe -waitList $waitList -timeoutSec $config.TimeoutSec | ForEach-Object { $satResult.Add($_) }
         }
         else {
             $dash.satellites | ForEach-Object {
                 $satid = $_.id
+                $t = [System.DateTimeOffset]::Now
                 try 
                 {
-                    Write-Host -NoNewline ("query {0}..." -f $address)
-                    $sat = GetJson -uri ("http://{0}/api/sno/satellite/{1}" -f $address, $satid) -timeout $timeoutSec
+                    Write-Host -NoNewline ("query {0} sat {1}..." -f $address, $satid)
+                    $sat = GetJson -uri ("http://{0}/api/sno/satellite/{1}" -f $address, $satid) -timeout $config.TimeoutSec
                     $satResult.Add($sat)
-                    Write-Host "completed"
+                    Write-Host ("completed {0} sec" -f ([int](([System.DateTimeOffset]::Now - $t).TotalSeconds)))
+                }
+                catch [System.OperationCanceledException] {
+                    Write-Host -ForegroundColor Red ("Timeout canceled node {0} sat {1}, {2} sec" -f $name, $satid, ([int](([System.DateTimeOffset]::Now - $t).TotalSeconds)))
                 }
                 catch {
-                    WriteError ($_.Exception.Message)
+                    Write-Error ($_.Exception.Message)
                 }
             }
         }
@@ -718,11 +733,10 @@ function QueryNode {$function:QueryNode}
 function GetNodes
 {
     param ($config, $query)
-    $timeoutSec = 30
     $result = [System.Collections.Generic.List[PSCustomObject]]@()
     
     #Start get storj services versions
-    $jobVersion = StartWebRequest -Name "StorjVersionQuery" -Address "https://version.storj.io" -Timeout $timeoutSec
+    $jobVersion = StartWebRequest -Name "StorjVersionQuery" -Address "https://version.storj.io" -Timeout $config.TimeoutSec
 
     if ($query.Parallel) {
         $waitList = New-Object System.Collections.Generic.List[[InProcess.InMemoryJob]]
@@ -731,7 +745,7 @@ function GetNodes
             $jobNode = Start-QueryNode -Name ("JobQueryNode[{0}]" -f $address) -InitializationScript $init -Address $address -Config $config -Query $query 
             $waitList.Add($jobNode)
         }
-        GetJobResultFailSafe -waitList $waitList -timeoutSec $timeoutSec | ForEach-Object { $result.Add($_)}
+        GetJobResultFailSafe -waitList $waitList -timeoutSec $config.TimeoutSec | ForEach-Object { $result.Add($_)}
     }
     else {
         $config.Nodes | ForEach-Object {
