@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.2"
+$v = "0.9.3"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -161,6 +161,9 @@ $v = "0.9.2"
 #               -   default months for -p changed from 2 to 4
 #               -   add Storage grow, grow factor, Earned column and graphics in payments and nodes
 #               -   Move text footer down after payments. Add Total earned to footer.
+# v0.9.3   - 20200502
+#               -   add relative payments table. You can safely post it on forums, where no amounts
+#               -   add dir column to indicate direction of trafic and it difference (egress/ingress or vice versa)
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -1832,7 +1835,6 @@ function GetPayments {
     [long]$heldAcc=0
     $allp = ($nodes | Select-Object -ExpandProperty Payments | Group-Object period | Sort-Object Name)
     $data = [System.Collections.Generic.List[PSCustomObject]]@()
-    $prevStorage = 0
     $allp | ForEach-Object {
         $period = $_.Name
 
@@ -1870,8 +1872,32 @@ function GetPayments {
         $paid = ($_.Group | Measure-Object -Sum paid).Sum
 
         $storage = ($_.Group | Measure-Object -Sum usageAtRest).Sum
-        if ($prevStorage -eq 0) { $gF = 1.0 }
-        else { $gF = [Math]::Round($storage / $prevStorage, 2)}
+        $storagePayment = ($_.Group | Measure-Object -Sum compAtRest).Sum
+        $ingress = ($_.Group | Measure-Object -Sum usagePut).Sum
+        $egress = ($_.Group | Measure-Object -Sum usageGet).Sum
+        $egressPayment = ($_.Group | Measure-Object -Sum compGet).Sum
+
+        if ($data.Count -eq 0) { 
+            $gF = 1.0 
+            $gpF = 1.0
+            $iF = 1.0
+            $eF = 1.0
+            $epF = 1.0
+            $erF = 1.0
+        }
+        else { 
+            $prev =  $data[$data.Count - 1]
+            $gF = [Math]::Round($storage / $prev.StorageAvgMonth, 2)
+            $gpF = [Math]::Round($storagePayment / $prev.StoragePayment, 2)
+            $iF = [Math]::Round($ingress / $prev.Put, 2)
+            $eF = [Math]::Round($egress / $prev.Get, 2)
+            $epF = [Math]::Round($egressPayment / $prev.GetPayment, 2)
+            $erF = [Math]::Round(($paid + $heldM)  / $prev.Earned, 2)
+        }
+
+        if ($egress -gt $ingress) { $dir = ("[ {0}> ]" -f ([Math]::Round([decimal]$egress / [decimal]$ingress, 2))) }
+        elseif ($egress -lt $ingress) { $dir = ("[ <{0} ]" -f ([Math]::Round([decimal]$ingress / [decimal]$egress, 2))) }
+        else { $dir = "[ <=> ]" }
 
         $p = @{
             'Period'                = $period
@@ -1879,15 +1905,20 @@ function GetPayments {
             'RecordCount'           = $_.Count
             'StorageAvgMonth'       = $storage
             'gF'                    = $gF
-            'StoragePayment'        = ($_.Group | Measure-Object -Sum compAtRest).Sum
-            'Get'                   = ($_.Group | Measure-Object -Sum usageGet).Sum
-            'GetPayment'            = ($_.Group | Measure-Object -Sum compGet).Sum
+            'gpF'                   = $gpF
+            'StoragePayment'        = $storagePayment
+            'Get'                   = $egress
+            'GetPayment'            = $egressPayment
+            'eF'                    = $eF
+            'epF'                   = $epF
             'GetRepairAudit'        = $gra
             'GetRepairAuditPayment' = $grap
-            'Put'                   = ($_.Group | Measure-Object -Sum usagePut).Sum
+            'Put'                   = $ingress
             'PutPayment'            = ($_.Group | Measure-Object -Sum compPut).Sum
+            'iF'                    = $iF
             'PutRepair'             = ($_.Group | Measure-Object -Sum usagePutRepair).Sum
             'PutRepairPayment'      = ($_.Group | Measure-Object -Sum compPutRepair).Sum
+            'Dir'                   = $dir
             'Surge'                 = $surge
             'HeldThisMonth'         = $heldM #Held amount depending on the node age
             'HeldAcc'               = $heldAcc
@@ -1895,11 +1926,12 @@ function GetPayments {
             'Disposed'              = ($_.Group | Measure-Object -Sum disposed).Sum #Any held amount payback. In this example graceful exit. It will also show the 50% payback in month 15
             'Paid'                  = $paid #Final payment for usage + held amount
             'Earned'                = $heldM + $paid
+            'erF'                   = $erF
             'EtherCount'            = $etherCount
             'EtherSum'              = $etherSum
         }
         $data.Add((New-Object -TypeName PSCustomObject –Prop $p)) | Out-Null
-        $prevStorage = $storage
+        $prev = $_
     }
 
     [System.Collections.ArrayList]$dataFiltered = $null
@@ -1914,7 +1946,7 @@ function GetPayments {
     }
 
     $paySummary = @{
-        'Period'                = ("{0} months" -f ($dataFiltered | Measure-Object).Count)
+        'Period'                = ("{0}m" -f ($dataFiltered | Measure-Object).Count)
         'RecordCount'           = ($dataFiltered | Measure-Object -Sum RecordCount).Sum
         'StorageAvgMonth'       = ($dataFiltered | Measure-Object -Sum StorageAvgMonth).Sum
         'StoragePayment'        = ($dataFiltered | Measure-Object -Sum StoragePayment).Sum
@@ -1937,10 +1969,23 @@ function GetPayments {
     }
     
     $storageMax = ($dataFiltered | Measure-Object -Maximum StorageAvgMonth).Maximum
+    $storagePaymentMax = ($dataFiltered | Measure-Object -Maximum StoragePayment).Maximum
+
+    $putMax = ($dataFiltered | Measure-Object -Maximum Put).Maximum
+    
+    $egressMax = ($dataFiltered | Measure-Object -Maximum Get).Maximum
+    $egressPaymentMax = ($dataFiltered | Measure-Object -Maximum GetPayment).Maximum
+
     $earnedMax = ($dataFiltered | Measure-Object -Maximum Earned).Maximum
+
+    
     $dataFiltered.Add((New-Object -TypeName PSCustomObject –Prop $PaySummary)) | Out-Null
     $summary | Add-Member $paySummary
     $summary | Add-Member -NotePropertyName StorageMaximum -NotePropertyValue $storageMax
+    $summary | Add-Member -NotePropertyName StoragePaymentMaximum -NotePropertyValue $storagePaymentMax
+    $summary | Add-Member -NotePropertyName IngressMaximum -NotePropertyValue $putMax
+    $summary | Add-Member -NotePropertyName EgressMaximum -NotePropertyValue $egressMax
+    $summary | Add-Member -NotePropertyName EgressPaymentMaximum -NotePropertyValue $egressPaymentMax
     $summary | Add-Member -NotePropertyName EarnedMaximum -NotePropertyValue $earnedMax
 
     return $dataFiltered
@@ -1948,14 +1993,15 @@ function GetPayments {
 
 function DisplayPayments {
     param ($payments, $summary)
+    Write-Host Payments
     $payments | Format-Table -AutoSize `
     @{n="Period"; e={$_.Period}}, `
     @{n="Count"; e={$_.RecordCount}}, `
     @{n="Surge"; e={$_.Surge}}, `
     @{n="Storage"; e={(HumanBytes -bytes $_.StorageAvgMonth -dec) + "m"}}, `
-    @{n="Storage grow, gF"; e={(GetPips -width 14 -max $summary.StorageMaximum -current $_.StorageAvgMonth -condition ($_.Period.IndexOf("-") -gt 0)) + $_.gF.ToString() }}, `
+    @{n="Storage grow"; e={(GetPips -width 12 -max $summary.StorageMaximum -current $_.StorageAvgMonth -condition ($_.Period.IndexOf("-") -gt 0)) + $_.gF.ToString() }}, `
     @{n="Ingress"; e={(HumanBytes -bytes $_.Put -dec)}}, `
-    #@{n="IngressRepair"; e={(HumanBytes -bytes $_.PutRepair -dec)}}, `
+    @{n="Dir"; e={$_.Dir}}, `
     @{n="Egress"; e={(HumanBytes -bytes $_.Get -dec)}}, `
     @{n="R&A Egress"; e={(HumanBytes -bytes $_.GetRepairAudit -dec)}}, `
     @{n="Storage"; e={HumanBaks($_.StoragePayment)}}, `
@@ -1966,9 +2012,24 @@ function DisplayPayments {
     @{n="Owed"; e={HumanBaks($_.Owed)}}, `
     @{n="Disposed"; e={HumanBaks($_.Disposed)}}, `
     @{n="Paid"; e={HumanBaks($_.Paid)}}, `
-    @{n="Earned          "; e={("{0} {1}" -f ((GetPips -width 14 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid) -condition ($_.Period.IndexOf("-") -gt 0)), (HumanBaks(($_.HeldThisMonth + $_.Paid)))))}}, `
+    @{n="Earned        "; e={("{0} {1}" -f ((GetPips -width 12 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid) -condition ($_.Period.IndexOf("-") -gt 0)), (HumanBaks(($_.HeldThisMonth + $_.Paid)))))}}, `
     @{n="EtherCount"; e={$_.EtherCount}}, `
     @{n="EtherSum"; e={[Math]::Round($_.EtherSum, 2)}}
+}
+
+function DisplayRelativePayments {
+    param ($payments, $summary)
+    Write-Host Relative payments
+    $payments | Where-Object {$_.Period.Contains("-")} | Format-Table -AutoSize `
+    @{n="Period"; e={$_.Period}}, `
+    @{n="Surge"; e={$_.Surge}}, `
+    @{n="Storage, gF"; e={(GetPips -width 14 -max $summary.StorageMaximum -current $_.StorageAvgMonth) + $_.gF.ToString() }}, `
+    @{n="Storage payment"; e={(GetPips -width 14 -max $summary.StoragePaymentMaximum -current $_.StoragePayment) + $_.gpF.ToString()}}, `
+    @{n="Ingress"; e={(GetPips -width 14 -max $summary.IngressMaximum -current $_.Put)  + $_.iF.ToString()}}, `
+    @{n="Dir"; e={$_.Dir}}, `
+    @{n="Egress"; e={(GetPips -width 14 -max $summary.EgressMaximum -current $_.Get) + $_.eF.ToString()}}, `
+    @{n="Egress payment"; e={(GetPips -width 14 -max $summary.EgressPaymentMaximum -current $_.GetPayment) + $_.epF.ToString()}}, `
+    @{n="Earned          "; e={(GetPips -width 14 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid)) + $_.erF.ToString()}}
 }
 
 function GetQuery {
@@ -2057,7 +2118,10 @@ elseif ($nodes.Count -gt 0) {
     }
     DisplayNodes -nodes $nodes -bwsummary $bwsummary -config $config
     Write-Host
-    if ($null -ne $config.Payout) { DisplayPayments -payments $payments -summary $bwsummary }
+    if ($null -ne $config.Payout) { 
+        DisplayPayments -payments $payments -summary $bwsummary 
+        DisplayRelativePayments -payments $payments -summary $bwsummary 
+    }
     DisplayFooter -nodes $nodes -bwsummary $bwsummary -config $config
 
     Write-Host ("Data collect time {0}s" -f ($query.EndData - $query.StartData).TotalSeconds)
