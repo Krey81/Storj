@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.0"
+$v = "0.9.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -152,6 +152,11 @@ $v = "0.9.0"
 #               -   add payments info (use cmdline key -p all)
 #               -   add suspended comment if present
 #               -   remove bandwidth columns
+# v0.9.1   - 20200502
+#               -   cache etherscan data
+#               -   fix payments sorting
+#               -   fix joined at date - may reflect on you amounts compare to 0.9.0
+#               -   add codes https://github.com/storj/storj/blob/895eac17113f74f7a6364cdf2fdbcea1b8d93ccc/satellite/compensation/codes.go#L11-L29
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -443,7 +448,8 @@ function LoadConfig{
 
     $config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
     $config | Add-Member -NotePropertyName Canary -NotePropertyValue $null
-    
+    $config | Add-Member -NotePropertyName MemFile -NotePropertyValue ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "Storj3Monitor_mem"))
+
     if ($null -eq $config.LastPingWarningMinutes) { 
         $config | Add-Member -NotePropertyName LastPingWarningMinutes -NotePropertyValue 30
     }
@@ -517,7 +523,7 @@ function GetJson
     # ((Invoke-WebRequest -Uri http://192.168.157.2:14002/api/sno).content | ConvertFrom-Json)
     #((Invoke-WebRequest -Uri http://192:4401/api/sno).content | ConvertFrom-Json)
     #((Invoke-WebRequest -Uri http://192:4401/api/sno/satellite/118UWpMCHzs6CvSgWd9BfFVjw5K9pZbJjkfZJexMtSkmKxvvAW).content | ConvertFrom-Json)
-    # ((Invoke-WebRequest -Uri http://192:4401/api/heldamount/paystubs/2020-03).content | ConvertFrom-Json)
+    #((Invoke-WebRequest -Uri http://51.89.0.35:4409/api/heldamount/paystubs/2020-03).content | ConvertFrom-Json)
 
     $resp = Invoke-WebRequest -Uri $uri -TimeoutSec $timeout
     if ($resp.StatusCode -ne 200) { throw $resp.StatusDescription }
@@ -644,7 +650,6 @@ function GetJobResultFailSafe {
 }
 
 #Debug 
-#$t = QueryNode -address "51.89.68.95:4416" -config $config -query $query
 function QueryNode
 {
     param($address, $config, $query)
@@ -708,11 +713,12 @@ function QueryNode
         $satResult | ForEach-Object {
             $sat = $_
             $dashSat = $dash.satellites | Where-Object { $_.id -eq $sat.id }
-            if ($sat.bandwidthDaily.Length -gt 0) {
-                if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
-                elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
-                $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
-            }
+            FixDateSat -sat $sat
+            # if ($sat.bandwidthDaily.Length -gt 0) {
+            #     if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
+            #     elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
+            #     $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
+            # }
             $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
             $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
             $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
@@ -945,9 +951,16 @@ function GetScore
             $comment = @()
             if ($sat.audit.successCount -lt 100) { $comment += ("vetting {0}" -f $sat.audit.successCount) }
 
+            $held = $null
+            $paid = $null
+            $codes = $null
             if ($null -ne $node.Payments) {
-                $held = ($node.Payments | Where-Object { $_.satelliteId -eq $sat.id } | Measure-Object -Sum held).Sum
-                $paid = ($node.Payments | Where-Object { $_.satelliteId -eq $sat.id } | Measure-Object -Sum paid).Sum
+                $satPayments = ($node.Payments | Where-Object { $_.satelliteId -eq $sat.id })
+                $held =  ($satPayments | Measure-Object -Sum held).Sum
+                $paid = ($satPayments | Measure-Object -Sum paid).Sum
+
+                $lastPaym = ($satPayments | Select-Object -Last 1)
+                if ($null -ne $lastPaym) { $codes = $lastPaym.codes }
             }
     
             New-Object PSCustomObject -Property @{
@@ -962,6 +975,7 @@ function GetScore
                 CommentMonitored = [String]::Join("; ", $commentMonitored)
                 Joined = $sat.nodeJoinedAt
                 Comment = [String]::Join("; ", $comment)
+                Codes = $codes
                 Held = $held
                 Paid = $paid
             }
@@ -1499,17 +1513,18 @@ function DisplayScore {
             'Node'      = $_.NodeName
             'Ingress'   = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Bandwidth.Ingress), (HumanBytes($_.Bandwidth.Ingress)))
             'Egress'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Bandwidth.Egress), (HumanBytes($_.Bandwidth.Egress)))
-#            'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
+            #'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'UptimeF'   = $_.Uptime
             'Joined'    = ("{0:yyyy-MM-dd}" -f $_.Joined)
             'Held'      = HumanBaks($_.Held)
             'Paid'      = HumanBaks($_.Paid)
+            'Codes'     = $_.Codes
             'Comment'   = "- " + [String]::Join("; ", $comment)
         }
         $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
     }
-    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Held, Paid, Comment | Out-String -Width 200
+    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Held, Paid, Codes, Comment | Out-String -Width 200
 
     Write-Host
 }
@@ -1705,7 +1720,7 @@ function GetFirstDate
     return New-Object DateTimeOffset((New-Object DateTime($date.Year, $date.Month, 1)), [TimeSpan]::Zero)
 }
 
-function GetPayout {
+function QueryPayout {
     param ($nodes, $config)
     if ($null -eq $config.EtherscanKey) { throw "No EtherscanKey given in config. This is etherscan.io API key. Please got it."}
 
@@ -1737,30 +1752,49 @@ function GetPayout {
         if ($null -eq $storj) { $storj = $tnx }
         else { $storj = $storj += $tnx }
     }
+    return $storj
+}
+
+function GetPayout {
+    param ($nodes, $config)
+
+    $storj = $null
+    try {
+        #Try load from cache
+        if (($null -ne $config.MemFile) `
+            -and [System.IO.File]::Exists($config.MemFile) `
+            -and (([DateTime]::Now - [System.IO.File]::GetCreationTime($config.MemFile)).TotalHours -lt 1.0) `
+            ){
+                $Storj3MonitorMem = ([System.IO.File]::ReadAllText($config.MemFile) | ConvertFrom-Json)
+                $storj = $Storj3MonitorMem.Etherscan
+        }
+    }
+    catch {
+        Write-Host -ForegroundColor Red $_.Exception.Message
+    }
+
+    if ($null -eq $storj) {
+        #Query etherscan and cache result
+        $storj = QueryPayout -nodes $nodes -config $config
+        try {
+            if ($null -ne $config.MemFile) {
+                $Storj3MonitorMem = New-Object pscustomobject
+                $Storj3MonitorMem | Add-Member -NotePropertyName Etherscan -NotePropertyValue $storj
+                $memJson = ConvertTo-Json $Storj3MonitorMem
+                [System.IO.File]::WriteAllText($config.MemFile, $memJson)
+            }
+        }
+        catch {
+            Write-Host -ForegroundColor Red $_.Exception.Message
+        }
+    }
 
     $storjFiltered = $null
     if ($config.Payout -eq 0) { $storjFiltered = $storj | Where-Object {$_.date -ge (GetFirstDate -date ([DateTimeOffset]::Now))} }
     elseif ($config.Payout -gt 0) { $storjFiltered = $storj | Where-Object {$_.date -ge (GetFirstDate -date ([DateTimeOffset]::Now.AddMonths(($config.Payout * -1) + 1)))} }
     elseif ($config.Payout -eq -1) { $storjFiltered = $storj }
     else { throw "bad param -p (Payout)" }
-    
 
-    # $total =  $storjFiltered | Measure-Object -Sum -Property value
-    # $byMonth = $storjFiltered | Group-Object -Property {GetFirstDate -date $_.date}
-
-    # #Output
-    # $byMonthOutput = $byMonth | ForEach-Object {
-    #     $sum = ($_.Group | Measure-Object -Sum -Property value)
-    #     $p = @{
-    #             'Date'  = [String]::Format("{0:yyyy MMMM}", $_.Values[0].date)
-    #             'Sum'   = [String]::Format("{0:0.00}" -f $sum.Sum)
-    #             'Tcount'= $sum.Count
-    #     }
-    #     Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
-    # }
-
-    # $byMonthOutput | Format-Table Date, Sum, Tcount
-    # Write-Host ("Total {0:0.00} Storj for {1} months, {2} transactions" -f $total.Sum, $byMonth.Values.Count, $total.Count)
     return $storjFiltered
 }
 
@@ -1780,7 +1814,7 @@ function DisplayPayments {
     }
 
     [long]$heldAcc=0
-    $allp = ($nodes | Select-Object -ExpandProperty Payments | Group-Object period | Sort-Object period)
+    $allp = ($nodes | Select-Object -ExpandProperty Payments | Group-Object period | Sort-Object Name)
     $data = [System.Collections.Generic.List[PSCustomObject]]@()
     $allp | ForEach-Object {
         $period = $_.Name
