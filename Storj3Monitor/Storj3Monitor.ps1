@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.3"
+$v = "0.9.4"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -164,6 +164,8 @@ $v = "0.9.3"
 # v0.9.3   - 20200502
 #               -   add relative payments table. You can safely post it on forums, where no amounts
 #               -   add dir column to indicate direction of trafic and it difference (egress/ingress or vice versa)
+# v0.9.4   - 20200503
+#               -   fix -d parameter
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -721,11 +723,9 @@ function QueryNode
             $sat = $_
             $dashSat = $dash.satellites | Where-Object { $_.id -eq $sat.id }
             FixDateSat -sat $sat
-            # if ($sat.bandwidthDaily.Length -gt 0) {
-            #     if ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "String") { FixDateSat -sat $sat }
-            #     elseif ($sat.bandwidthDaily[0].intervalStart.GetType().Name -eq "DateTime") { FixDateSat -sat $sat }
-            #     $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
-            # }
+            if ($sat.bandwidthDaily.Length -gt 0) {
+                $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
+            }
             $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
             $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
             $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
