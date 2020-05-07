@@ -5,3 +5,4 @@ FailoverMonitor/FailoverMonitor.Krey.conf
 LogSplitter/logsplitter.ps1
 storagenode_temp
 storagenode.exe
+Storj3Monitor/ConfigSamples/Storj3Monitor.Debug2.conf

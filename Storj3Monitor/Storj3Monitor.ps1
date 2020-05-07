@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.4"
+$v = "0.9.5"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -166,6 +166,18 @@ $v = "0.9.4"
 #               -   add dir column to indicate direction of trafic and it difference (egress/ingress or vice versa)
 # v0.9.4   - 20200503
 #               -   fix -d parameter
+# v0.9.5   - 20200507
+#               -   add debug message to future fix empty node back online in monitoring mode
+#               -   fix div by zero
+#               -   restore footer in canapy leters
+#               -   possible fix empty node back online in monitoring mode
+#               -   add failed nodes to footer
+#               -   hide payment columns without -p parameter
+
+# TODO v0.9.6
+#               -   add held amount rate
+#               -   fix () without wellknown nodes
+#               -   add current earnings
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -741,7 +753,7 @@ function QueryNode
     }
 
     #Get payment info
-    if ($null -ne $config.Payout) {
+    if (($null -ne $dash) -and ($null -ne $config.Payout)) {
         try {
             #$pays = ((Invoke-WebRequest -Uri  http://192:4401/api/heldamount/paystubs/2019-02/2020-05).content | ConvertFrom-Json)
             $earlest = ($dash | Select-Object -ExpandProperty Sat | Measure-Object -Minimum nodeJoinedAt).Minimum
@@ -759,8 +771,7 @@ function QueryNode
             Write-Error ("Failed to get payment {0}: {1}" -f $address, $_.Exception.Message )
         }
     }
-
-    Write-Output $dash
+    if ($null -ne $dash) { Write-Output $dash }
 }
 
 $init = 
@@ -799,7 +810,7 @@ function GetNodes
         $config.Nodes | ForEach-Object {
             $address = $_
             $dash = QueryNode -address $address -config $config -query $query
-            $result.Add($dash)
+            if ($null -ne $dash) { $result.Add($dash) }
         }
     }
     
@@ -1109,10 +1120,14 @@ function CheckNodes{
         #restore old values
         $id = $_.nodeID
         $old = $oldNodes | Where-Object {$_.nodeID -eq $id } | Select-Object -First 1
+
         if ($null -eq $old) { 
-            Write-Output ("Node {0} back online" -f $_.Name) | Tee-Object -Append -FilePath $body
+            if (-not [String]::IsNullOrEmpty($_.Name)) {
+                Write-Output ("Node {0} back online" -f $_.Name) | Tee-Object -Append -FilePath $body
+            }
             return 
         }
+
         $_.LastPingWarningValue = $old.LastPingWarningValue 
         $_.LastVerWarningValue = $old.LastVerWarningValue
 
@@ -1345,6 +1360,7 @@ function Monitor {
             $bwsummary = ($newNodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
             DisplayScore -score $newScore -bwsummary $bwsummary >> $body
             DisplayNodes -nodes $newNodes -bwsummary $bwsummary -config $config >> $body
+            DisplayFooter -nodes $newNodes -bwsummary $bwsummary -config $config >> $body
         }
         if (([System.IO.File]::Exists($body)) -and (Get-Item -Path $body).Length -gt 0)
         {
@@ -1408,6 +1424,7 @@ function DisplayNodes {
     $latest = $nodes | Where-Object {$null -ne $_.LastVersion } | Select-Object -ExpandProperty LastVersion -First 1
     $minimal = $nodes | Where-Object {$null -ne $_.MinimalVersion } | Select-Object -ExpandProperty MinimalVersion -First 1
 
+    $tab = [System.Collections.Generic.List[PSCustomObject]]@()
     $nodes | Group-Object Version | ForEach-Object {
         Write-Host -NoNewline ("storagenode version {0}" -f $_.Name)
         if ($null -ne $latest) {
@@ -1430,24 +1447,70 @@ function DisplayNodes {
         }
         else { Write-Host }
 
-        $_.Group | Sort-Object Name | Format-Table -AutoSize `
-        @{n="Node"; e={$_.Name}}, `
-        @{n="Runtime"; e={[int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours)}}, `
-        @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
-        @{n="Audit"; e={Round($_.Audit)}}, `
-        @{n="UptimeF"; e={$_.Uptime}}, `
-        @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
-        @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
-        @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
-        @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
-        @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
-        #@{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.BwSummary.Delete)), (HumanBytes($_.BwSummary.Delete)))}}, `
-        #@{n="[ Bandwidth"; e={("{0}" -f ((GetPips -width 10 -max $_.bandwidth.available -current $_.bandwidth.used)))}}, `
-        #@{n="Free ]"; e={HumanBytes(($_.bandwidth.available - $_.bandwidth.used))}} `
-        @{n="($) Held"; e={HumanBaks(($_.Held))}}, `
-        @{n="Paid"; e={HumanBaks(($_.Paid))}}, `
-        @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.HeldAcc + $bwsummary.Paid) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
-        | Out-String -Width 200
+        $_.Group | Sort-Object Name | ForEach-Object {
+            $p = @{
+                "Node"      = $_.Name
+                "Runtime"   = ([int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours))
+                "Ping"      = ([DateTimeOffset]::Now - $_.lastPinged)
+                "Audit"     = Round($_.Audit)
+                "Uptime"   = $_.Uptime
+                "Used"      = $_.diskSpace.used
+                "Available" = $_.diskSpace.available
+                "Egress"    = $_.BwSummary.Egress
+                "Ingress"   = $_.BwSummary.Ingress
+                "Held"      = $_.Held
+                "Paid"      = $_.Paid
+            }
+            $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
+        }
+
+        if ($null -ne $config.Payout) {
+            $tab | Format-Table -AutoSize `
+            @{n="Node"; e={$_.Node}}, `
+            @{n="Runtime"; e={$_.Runtime}}, `
+            @{n="Ping"; e={HumanTime($_.Ping)}}, `
+            @{n="Audit"; e={$_.Audit}}, `
+            @{n="UptimeF"; e={$_.Uptime}}, `
+            @{n="[ Used  "; e={HumanBytes($_.Used)}}, `
+            @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.Available -current $_.Used)))}}, `
+            @{n="Free ]"; e={HumanBytes(($_.Available - $_.Used))}}, `
+            @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Egress)), (HumanBytes($_.Egress)))}}, `
+            @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}}, `
+            @{n="($) Held"; e={HumanBaks(($_.Held))}}, `
+            @{n="Paid"; e={HumanBaks(($_.Paid))}}, `
+            @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.HeldAcc + $bwsummary.Paid) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
+            | Out-String -Width 200
+        }
+        else {
+            $tab | Format-Table -AutoSize `
+            @{n="Node"; e={$_.Node}}, `
+            @{n="Runtime"; e={$_.Runtime}}, `
+            @{n="Ping"; e={HumanTime($_.Ping)}}, `
+            @{n="Audit"; e={$_.Audit}}, `
+            @{n="UptimeF"; e={$_.Uptime}}, `
+            @{n="[ Used  "; e={HumanBytes($_.Used)}}, `
+            @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.Available -current $_.Used)))}}, `
+            @{n="Free ]"; e={HumanBytes(($_.Available - $_.Used))}}, `
+            @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Egress)), (HumanBytes($_.Egress)))}}, `
+            @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}} `
+            | Out-String -Width 200
+        }
+
+        # $_.Group | Sort-Object Name | Format-Table -AutoSize `
+        # @{n="Node"; e={$_.Name}}, `
+        # @{n="Runtime"; e={[int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours)}}, `
+        # @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
+        # @{n="Audit"; e={Round($_.Audit)}}, `
+        # @{n="UptimeF"; e={$_.Uptime}}, `
+        # @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
+        # @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
+        # @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
+        # @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
+        # @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
+        # @{n="($) Held"; e={HumanBaks(($_.Held))}}, `
+        # @{n="Paid"; e={HumanBaks(($_.Paid))}}, `
+        # @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.HeldAcc + $bwsummary.Paid) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
+        # | Out-String -Width 200
     }
 
     $vetting = $nodes | Select-Object -ExpandProperty Sat `
@@ -1508,9 +1571,30 @@ function DisplayFooter {
     $maxBandwidth = $nodes | Sort-Object -Descending {$_.BwSummary.Bandwidth} | Select-Object -First 1
     Write-Output ("- Max bandwidth {0} at {1}" -f (HumanBytes($maxBandwidth.BwSummary.Bandwidth)), $maxBandwidth.Name)
 
-    if ($null -ne $bwsummary.EtherSum -and $bwsummary.EtherSum -gt 0) {$tokens = ("({0} STORJ)" -f [Math]::Round($bwsummary.EtherSum,0))}
-    else {$tokens = ""}
-    Write-Output ("Total earned {0}$ - held {1}$; paid {2}$ {3}" -f (HumanBaks($bwsummary.HeldAcc + $bwsummary.Paid)), (HumanBaks($bwsummary.HeldAcc)), (HumanBaks($bwsummary.Paid)), $tokens)
+    if ($null -ne $config.Payout) { 
+        if ($null -ne $bwsummary.EtherSum -and $bwsummary.EtherSum -gt 0) { $tokens = ("({0} STORJ)" -f [Math]::Round($bwsummary.EtherSum,0)) }
+        else { $tokens = "" }
+        Write-Output ("Total earned {0}$ - held {1}$; paid {2}$ {3}" -f (HumanBaks($bwsummary.HeldAcc + $bwsummary.Paid)), (HumanBaks($bwsummary.HeldAcc)), (HumanBaks($bwsummary.Paid)), $tokens)
+    }
+
+    $failedNodesCount = ($config.Nodes.Count - $nodes.Count)
+    if ($failedNodesCount -gt 0) {
+        $respond = ($nodes | Select-Object -ExpandProperty Address)
+        $failed = $config.Nodes | Where-Object {$respond -notcontains $_}
+        Write-Output ""
+        Write-Output "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        if ($failedNodesCount -eq 1) {
+            Write-Output ("NODE ON ADDRESS {0} DOES NOT RESPOND" -f $failed)
+        }
+        else {
+            Write-Output ("{0} NODES DOES NOT RESPOND: " -f $failedNodesCount)
+            $failed | ForEach-Object { 
+                Write-Output ("`tNODE ON ADDRESS {0}" -f $_)
+            }
+        }
+        Write-Output "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        Write-Output ""
+    }
 }
 
 function DisplayScore {
@@ -1543,8 +1627,13 @@ function DisplayScore {
         }
         $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
     }
-    $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Held, Paid, Codes, Comment | Out-String -Width 200
 
+    if ($null -ne $config.Payout) { 
+        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Held, Paid, Codes, Comment | Out-String -Width 200
+    }
+    else {
+        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, UptimeF, Comment | Out-String -Width 200
+    }
     Write-Host
 }
 
@@ -1744,9 +1833,9 @@ function QueryPayout {
     if ($null -eq $config.EtherscanKey) { throw "No EtherscanKey given in config. This is etherscan.io API key. Please got it."}
 
     if ($null -eq $config.Payout) { throw "No payouts queried" }
-    elseif ($config.Payout -eq 0) { Write-Host "Payouts for current month:" }
-    elseif ($config.Payout -eq -1) { Write-Host "Payouts all:" }
-    else { Write-Host ("Payouts for last {0} months:" -f $config.Payout) }
+    elseif ($config.Payout -eq 0) { Write-Host "Query payments for current month..." }
+    elseif ($config.Payout -eq -1) { Write-Host "Query all payments..." }
+    else { Write-Host ("Query payments for last {0} months..." -f $config.Payout) }
     Write-Host
 
     $ethScanUrlTemplate = ("http://api.etherscan.io/api?module=account&action=tokentx&address=[address]&startblock=0&endblock=999999999&sort=asc&apikey={0}" -f $config.EtherscanKey)
@@ -1815,6 +1904,13 @@ function GetPayout {
     else { throw "bad param -p (Payout)" }
 
     return $storjFiltered
+}
+
+function SafeRound()
+{
+    param ([double]$nominator, [double]$denominator, [int]$decimals)
+    if ($denominator -eq 0) { return 0 }
+    return [Math]::Round($nominator / $denominator, $decimals)
 }
 
 function GetPayments {
@@ -1887,16 +1983,22 @@ function GetPayments {
         }
         else { 
             $prev =  $data[$data.Count - 1]
-            $gF = [Math]::Round($storage / $prev.StorageAvgMonth, 2)
-            $gpF = [Math]::Round($storagePayment / $prev.StoragePayment, 2)
-            $iF = [Math]::Round($ingress / $prev.Put, 2)
-            $eF = [Math]::Round($egress / $prev.Get, 2)
-            $epF = [Math]::Round($egressPayment / $prev.GetPayment, 2)
-            $erF = [Math]::Round(($paid + $heldM)  / $prev.Earned, 2)
+            $gF = SafeRound -nominator $storage -denominator $prev.StorageAvgMonth -decimals 2
+            $gpF = SafeRound -nominator $storagePayment -denominator $prev.StoragePayment -decimals 2
+            $iF = SafeRound -nominator $ingress -denominator $prev.Put -decimals 2
+            $eF = SafeRound -nominator $egress -denominator $prev.Get -decimals 2
+            $epF = SafeRound -nominator $egressPayment -denominator $prev.GetPayment -decimals 2
+            $erF = SafeRound -nominator ($paid + $heldM) -denominator $prev.Earned -decimals 2
         }
 
-        if ($egress -gt $ingress) { $dir = ("[ {0}> ]" -f ([Math]::Round([decimal]$egress / [decimal]$ingress, 2))) }
-        elseif ($egress -lt $ingress) { $dir = ("[ <{0} ]" -f ([Math]::Round([decimal]$ingress / [decimal]$egress, 2))) }
+        if ($egress -gt $ingress) { 
+            if ($ingress -eq 0) { $dir = "[ > ]" }
+            else { $dir = ("[ {0}> ]" -f ([Math]::Round([decimal]$egress / [decimal]$ingress, 2))) }
+        }
+        elseif ($egress -lt $ingress) { 
+            if ($egress -eq 0) { $dir = "[ < ]" }
+            else { $dir = ("[ <{0} ]" -f ([Math]::Round([decimal]$ingress / [decimal]$egress, 2))) }
+        }
         else { $dir = "[ <=> ]" }
 
         $p = @{
