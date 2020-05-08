@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.5"
+$v = "0.9.6"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -173,8 +173,12 @@ $v = "0.9.5"
 #               -   possible fix empty node back online in monitoring mode
 #               -   add failed nodes to footer
 #               -   hide payment columns without -p parameter
+# v0.9.6   - 20200508
+#               -   fix joins storj payments with etherscan 
+#               -   move held columns in absolute payments
+#               -   add -nocache cmdline option to ignore saved etherscan data
 
-# TODO v0.9.6
+# TODO v0.9.7
 #               -   add held amount rate
 #               -   fix () without wellknown nodes
 #               -   add current earnings
@@ -396,6 +400,7 @@ function IsAnniversaryVersion {
     if (IsAnniversaryVersion($v)) { Write-Host -ForegroundColor Green "`t- Anniversary version: Astrologers proclaim the week of incredible bottled income" }
     else { Write-Host }
     Write-Host "mail-to: krey@irinium.ru"
+    Write-Host "telegram: Krey81"
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
@@ -403,6 +408,7 @@ function IsAnniversaryVersion {
     Write-Host ""
     Write-Host "Thanks Sans Kokor for bug hunting"
     Write-Host "Thanks underflow17"
+    Write-Host "...and all STORJ Russian Chat members"
     Write-Host ""
 }
 
@@ -470,6 +476,7 @@ function LoadConfig{
     $config | Add-Member -NotePropertyName StartTime -NotePropertyValue ([System.DateTimeOffset]::Now)
     $config | Add-Member -NotePropertyName Canary -NotePropertyValue $null
     $config | Add-Member -NotePropertyName MemFile -NotePropertyValue ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "Storj3Monitor_mem"))
+    $config | Add-Member -NotePropertyName NoCache -NotePropertyValue $false
 
     if ($null -eq $config.LastPingWarningMinutes) { 
         $config | Add-Member -NotePropertyName LastPingWarningMinutes -NotePropertyValue 30
@@ -532,6 +539,9 @@ function LoadConfig{
         }
         $config.Payout = $payout
     }
+
+    $idx = $cmdlineArgs.IndexOf("-nocache")
+    if ($idx -gt 0) { $config.NoCache = $true }
 
     return $config
 }
@@ -1828,6 +1838,15 @@ function GetFirstDate
     return New-Object DateTimeOffset((New-Object DateTime($date.Year, $date.Month, 1)), [TimeSpan]::Zero)
 }
 
+function GetFirstDateFromPeriod
+{
+    param($period)
+    $pp = $period.Split('-')
+    $year = [int]$pp[0]
+    $month = [int]$pp[1]
+    return New-Object DateTimeOffset((New-Object DateTime($year, $month, 1)), [TimeSpan]::Zero)
+}
+
 function QueryPayout {
     param ($nodes, $config)
     if ($null -eq $config.EtherscanKey) { throw "No EtherscanKey given in config. This is etherscan.io API key. Please got it."}
@@ -1869,7 +1888,8 @@ function GetPayout {
     $storj = $null
     try {
         #Try load from cache
-        if (($null -ne $config.MemFile) `
+        if ( (-not $config.NoCache) `
+            -and ($null -ne $config.MemFile) `
             -and [System.IO.File]::Exists($config.MemFile) `
             -and (([DateTime]::Now - [System.IO.File]::GetCreationTime($config.MemFile)).TotalHours -lt 1.0) `
             ){
@@ -1895,6 +1915,18 @@ function GetPayout {
         catch {
             Write-Host -ForegroundColor Red $_.Exception.Message
         }
+    }
+    
+    #Fix date issue for older powershell versions
+    if (($null -ne $storj) -and ($storj.Count -gt 0) -and $storj[0].date.GetType().Name -ne "DateTimeOffset") {
+        Write-Host "Converting DateTimes..."
+        $storj | ForEach-Object { $_.date = [System.DateTimeOffset]($_.date)} 
+    }
+    
+    $storj | ForEach-Object {
+        $fd = GetFirstDate -date $_.date.AddMonths(-1)
+        $period = ("{0}-{1:00}" -f $fd.Year, $fd.Month) 
+        $_ | Add-Member -NotePropertyName Period -NotePropertyValue $period
     }
 
     $storjFiltered = $null
@@ -1933,15 +1965,10 @@ function GetPayments {
     $data = [System.Collections.Generic.List[PSCustomObject]]@()
     $allp | ForEach-Object {
         $period = $_.Name
-
-        $pp = $period.Split('-')
-        $year = [int]$pp[0]
-        $month = [int]$pp[1]
-
         $etherCount = 0
         $etherSum = 0
         if ($null -ne $ether) {
-            $em = ($ether | Where-Object {($_.date.Year -eq $year) -and ($_.date.Month -eq $month) } | Measure-Object -Sum value)
+            $em = ($ether | Where-Object { $_.Period -eq $period } | Measure-Object -Sum value)
             $etherCount = $em.Count
             $etherSum = $em.Sum
         }
@@ -2003,7 +2030,7 @@ function GetPayments {
 
         $p = @{
             'Period'                = $period
-            'FirstDate'             = New-Object DateTimeOffset((New-Object DateTime($year, $month, 1)), [TimeSpan]::Zero)
+            'FirstDate'             = (GetFirstDateFromPeriod -period $period)
             'RecordCount'           = $_.Count
             'StorageAvgMonth'       = $storage
             'gF'                    = $gF
@@ -2034,6 +2061,25 @@ function GetPayments {
         }
         $data.Add((New-Object -TypeName PSCustomObject –Prop $p)) | Out-Null
         $prev = $_
+    }
+
+    $fd = ($nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty nodeJoinedAt | Measure-Object -Minimum).Minimum
+    $dd = $data | Select-Object -ExpandProperty Period -Unique
+    $absent = $ether | Where-Object { ($_.date -gt $fd) -and ($dd -notcontains $_.Period) }
+
+    if ($absent.Count -gt 0) {
+        $absent | Group-Object Period | ForEach-Object {
+            $m = $_.Group | Measure-Object -Sum value
+            $p = @{
+                'Period'        = $_.Name
+                'FirstDate'     = (GetFirstDateFromPeriod -period $_.Name)
+                'RecordCount'   = 0
+                'EtherCount'    = $_.Count
+                'EtherSum'      = $m.Sum
+            }
+            $data.Add((New-Object -TypeName PSCustomObject –Prop $p)) | Out-Null
+        }
+        $data = ($data | Sort-Object Period)
     }
 
     [System.Collections.ArrayList]$dataFiltered = $null
@@ -2109,10 +2155,10 @@ function DisplayPayments {
     @{n="Storage"; e={HumanBaks($_.StoragePayment)}}, `
     @{n="Egress"; e={HumanBaks($_.GetPayment)}}, `
     @{n="R&A"; e={HumanBaks($_.GetRepairAuditPayment)}}, `
-    @{n="Held(month)"; e={HumanBaks($_.HeldThisMonth)}}, `
-    @{n="HeldAcc"; e={HumanBaks($_.HeldAcc)}}, `
     @{n="Owed"; e={HumanBaks($_.Owed)}}, `
     @{n="Disposed"; e={HumanBaks($_.Disposed)}}, `
+    @{n="HeldAcc"; e={HumanBaks($_.HeldAcc)}}, `
+    @{n="Held(month)"; e={HumanBaks($_.HeldThisMonth)}}, `
     @{n="Paid"; e={HumanBaks($_.Paid)}}, `
     @{n="Earned        "; e={("{0} {1}" -f ((GetPips -width 12 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid) -condition ($_.Period.IndexOf("-") -gt 0)), (HumanBaks(($_.HeldThisMonth + $_.Paid)))))}}, `
     @{n="EtherCount"; e={$_.EtherCount}}, `
@@ -2122,7 +2168,7 @@ function DisplayPayments {
 function DisplayRelativePayments {
     param ($payments, $summary)
     Write-Host Relative payments
-    $payments | Where-Object {$_.Period.Contains("-")} | Format-Table -AutoSize `
+    $payments | Where-Object {$_.Period.Contains("-") -and ($_.RecordCount -gt 0)} | Format-Table -AutoSize `
     @{n="Period"; e={$_.Period}}, `
     @{n="Surge"; e={$_.Surge}}, `
     @{n="Storage, gF"; e={(GetPips -width 14 -max $summary.StorageMaximum -current $_.StorageAvgMonth) + $_.gF.ToString() }}, `
