@@ -177,6 +177,7 @@ $v = "0.9.6"
 #               -   fix joins storj payments with etherscan 
 #               -   move held columns in absolute payments
 #               -   add -nocache cmdline option to ignore saved etherscan data
+#               -   fix date compare (old powershell) issue
 
 # TODO v0.9.7
 #               -   add held amount rate
