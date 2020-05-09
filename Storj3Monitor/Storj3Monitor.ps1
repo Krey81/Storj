@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.6"
+$v = "0.9.7"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -178,8 +178,13 @@ $v = "0.9.6"
 #               -   move held columns in absolute payments
 #               -   add -nocache cmdline option to ignore saved etherscan data
 #               -   fix date compare (old powershell) issue
+# v0.9.7   - 20200509
+#               -   congratulations on the day of Victory over the most terrible evil in the known history of mankind
+#               -   add "Disk space used this month" graph for all nodes
+#               -   add current earnings with held and paid, disk and egress
 
-# TODO v0.9.7
+
+# TODO v0.9.8
 #               -   add held amount rate
 #               -   fix () without wellknown nodes
 #               -   add current earnings
@@ -394,12 +399,17 @@ function IsAnniversaryVersion {
     if (($vdec % $standardBootleVolumeLitters) -eq 0.0) { return $true }
     else { return $false }
 }
-
- function Preamble{
+function IsVictoryDay {
+    $now = [System.DateTime]::Now
+    if (($now.Month -eq 5) -and ($now.Day -eq 9)) { return $true }
+    return $false
+}
+function Preamble{
     Write-Host ""
     Write-Host -NoNewline ("Storj3Monitor script by Krey ver {0}" -f $v)
     if (IsAnniversaryVersion($v)) { Write-Host -ForegroundColor Green "`t- Anniversary version: Astrologers proclaim the week of incredible bottled income" }
     else { Write-Host }
+    if (IsVictoryDay) { Write-Host -ForegroundColor Green "GLORIOUS VICTORY"}
     Write-Host "mail-to: krey@irinium.ru"
     Write-Host "telegram: Krey81"
     Write-Host ""
@@ -681,6 +691,20 @@ function GetJobResultFailSafe {
     if ($waitList.Count -gt 0) { Write-Error "Some jobs hang" }
 }
 
+function GetDailyTimeline
+{
+    param($daily)
+    $rest = $daily | Group-Object intervalStart
+    $timeline = New-Object "System.Collections.Generic.SortedList[int, long]"
+    $rest | ForEach-Object {
+        $key = [DateTime]::Parse($_.Name).Day
+        $valueDec = ($_.Group | Measure-Object -Sum atRestTotal).Sum
+        $value = [long]([System.Math]::Ceiling($valueDec))
+        $timeline.Add($key, $value)
+    }
+    return $timeline
+}
+
 #Debug 
 function QueryNode
 {
@@ -749,11 +773,20 @@ function QueryNode
             if ($sat.bandwidthDaily.Length -gt 0) {
                 $sat.bandwidthDaily = FilterBandwidth -bw $sat.bandwidthDaily -query $query
             }
+
+            $now = [DateTimeOffset]::UtcNow
+            $age =  (($now.Month - $sat.nodeJoinedAt.Month) + 12 * ($now.Year - $sat.nodeJoinedAt.Year))
+            $rest = GetDailyTimeline -daily $sat.storageDaily
+            $restTotal = ($rest.Values | Measure-Object -Sum).Sum
+            
             $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
             $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
             $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
             $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
             $sat | Add-Member -NotePropertyName Susp -NotePropertyValue ($dashSat.suspended)
+            $sat | Add-Member -NotePropertyName Age -NotePropertyValue $age
+            $sat | Add-Member -NotePropertyName RestByDay -NotePropertyValue $rest
+            $sat | Add-Member -NotePropertyName RestByDayTotal -NotePropertyValue $restTotal
             $dash.Sat.Add($sat)
         }
 
@@ -797,6 +830,7 @@ function FilterBandwidth {$function:FilterBandwidth}
 function GetJobResultNormal {$function:GetJobResultNormal}
 function GetJobResultFailSafe {$function:GetJobResultFailSafe}
 function StartWebRequest {$function:StartWebRequest}
+function GetDailyTimeline {$function:GetDailyTimeline}
 function QueryNode {$function:QueryNode}
 "@)
 
@@ -833,8 +867,7 @@ function GetNodes
         $satVer = $jobVersion.Output[0]
         $latest = $satVer.processes.storagenode.suggested.version
         $minimal = [String]::Join('.',  $satVer.Storagenode.major.ToString(), $satVer.Storagenode.minor.ToString(), $satVer.Storagenode.patch.ToString())
-        $time = ($jobVersion.PSEndTime - $jobVersion.PSEndTime).TotalMilliseconds
-        Write-Host ("Latest storagenode version is {0}, query time {1}ms" -f $latest, $time)
+        Write-Host ("Latest storagenode version is {0}" -f $latest)
         $result | ForEach-Object { 
             $_.LastVersion = $latest 
             $_.MinimalVersion = $minimal 
@@ -1003,6 +1036,7 @@ function GetScore
                 Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
                 CommentMonitored = [String]::Join("; ", $commentMonitored)
                 Joined = $sat.nodeJoinedAt
+                Age = $sat.Age
                 Comment = [String]::Join("; ", $comment)
                 Codes = $codes
                 Held = $held
@@ -1015,7 +1049,9 @@ function GetScore
     $score | Group-Object NodeId | ForEach-Object {
         $nodeId = $_.Name
         $node = $nodes | Where-Object {$_.NodeId -eq $nodeId} | Select-Object -First 1
-        $node.BwSummary = ($_.Group | Select-Object -ExpandProperty Bandwidth | AggBandwidth2)
+        $bw = ($_.Group | Select-Object -ExpandProperty Bandwidth | AggBandwidth2)
+        #$node.BwSummary = GetNodeSummary -bandwidth
+        $node.BwSummary = $bw
         $node.Audit = ($_.Group | Select-Object -ExpandProperty Audit | Measure-Object -Min).Minimum
         $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Sum).Sum
     }
@@ -1063,7 +1099,8 @@ function HumanBaks {
     param ([long]$value)
     $rv = [Math]::Round([decimal]$value / 1000000, 2)
     if ($rv -lt 0.001) { return "0" }
-    return ($rv.ToString())
+    #TODO забыл, потом поправлю
+    return ($rv.ToString().Replace(",","."))
 }
 function CheckNodes{
     param(
@@ -1536,6 +1573,15 @@ function DisplayNodes {
     }
 }
 
+function GetHeldPercent
+{
+    param ($age)
+    if ($age -lt 4) { return 0.75 }
+    elseif ($age -lt 7) { return 0.5 }
+    elseif ($age -lt 10) { return 0.25 }
+    else { return 0 }
+}
+
 function DisplayFooter {
     param ($nodes, $bwsummary, $config)
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
@@ -1581,11 +1627,42 @@ function DisplayFooter {
 
     $maxBandwidth = $nodes | Sort-Object -Descending {$_.BwSummary.Bandwidth} | Select-Object -First 1
     Write-Output ("- Max bandwidth {0} at {1}" -f (HumanBytes($maxBandwidth.BwSummary.Bandwidth)), $maxBandwidth.Name)
+    Write-Output ""
 
     if ($null -ne $config.Payout) { 
+        #priceModel       : @{EgressBandwidth=2000; RepairBandwidth=1000; AuditBandwidth=1000; DiskSpace=150}        
+        $nm = ([DateTime]::Now).AddMonths(1)
+        $hours = ((Get-Date -Year $nm.Year -Month $nm.Month -Day 1).AddDays(-1).Day) * 24
+        $currentPayments = $nodes | Select-Object -ExpandProperty Sat | ForEach-Object { New-Object PSCustomObject -Property @{
+            Node = $_.NodeName
+            Sat = $_.Name
+            Age = $_.Age
+            HeldPercent =(GetHeldPercent -age $_.Age)
+            RestByDayTotal = $_.RestByDayTotal
+            Disk = ((($_.RestByDayTotal  / 1000000) / $hours) * 1.5)
+            Egress = ($_.egressSummary / 1000000) * 20
+            Earned = 0
+            Held = 0
+            Paid = 0
+        }}
+        $currentPayments | ForEach-Object {
+            $_.Earned = $_.Disk + $_.Egress
+            $_.Held = $_.Earned * $_.HeldPercent
+            $_.Paid = $_.Earned - $_.Held
+        }
+
+        $disk = (HumanBaks -value (($currentPayments | Measure-Object -Sum Disk).Sum))
+        $egress = (HumanBaks -value (($currentPayments | Measure-Object -Sum Egress).Sum))
+        $earned = (HumanBaks -value (($currentPayments | Measure-Object -Sum Earned).Sum))
+        $held = (HumanBaks -value (($currentPayments | Measure-Object -Sum Held).Sum))
+        $paid = (HumanBaks -value (($currentPayments | Measure-Object -Sum Paid).Sum))
+
+        Write-Output ("Current month earnings {0}$ - {1}$ held, {2}$ paid ({3}$ storage, {4}$ egress)" -f $earned, $held, $paid, $disk, $egress)
+
         if ($null -ne $bwsummary.EtherSum -and $bwsummary.EtherSum -gt 0) { $tokens = ("({0} STORJ)" -f [Math]::Round($bwsummary.EtherSum,0)) }
         else { $tokens = "" }
         Write-Output ("Total earned {0}$ - held {1}$; paid {2}$ {3}" -f (HumanBaks($bwsummary.HeldAcc + $bwsummary.Paid)), (HumanBaks($bwsummary.HeldAcc)), (HumanBaks($bwsummary.Paid)), $tokens)
+        Write-Output ""
     }
 
     $failedNodesCount = ($config.Nodes.Count - $nodes.Count)
@@ -1610,7 +1687,6 @@ function DisplayFooter {
 
 function DisplayScore {
     param ($score, $bwsummary)
-    $now = [System.DateTimeOffset]::UtcNow
     Write-Host
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    D E T A I L S"
 
@@ -1621,7 +1697,6 @@ function DisplayScore {
         if (-not [String]::IsNullOrEmpty($_.CommentMonitored)) { $comment += $_.CommentMonitored}
         if (-not [String]::IsNullOrEmpty($_.Comment)) { $comment += $_.Comment}
 
-        $age =  ($now.Month - $_.Joined.Month) + 12 * ($now.Year - $_.Joined.Year);
         $p = @{
             'Satellite' = $_.SatelliteName
             'Node'      = $_.NodeName
@@ -1630,7 +1705,7 @@ function DisplayScore {
             #'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'UptimeF'   = $_.Uptime
-            'Joined'    = ("{0:yyyy-MM-dd} ({1,2})" -f $_.Joined, $age)
+            'Joined'    = ("{0:yyyy-MM-dd} ({1,2})" -f $_.Joined, $_.Age)
             'Held'      = HumanBaks($_.Held)
             'Paid'      = HumanBaks($_.Paid)
             'Codes'     = $_.Codes
@@ -1783,6 +1858,68 @@ function GraphTimeline
     Write-Host
     Write-Host
 }
+
+function GraphRest
+{
+    param ($summary)
+    $height = 10
+    $title = "Disk space used this month"
+    $timeline = $summary.RestByDay
+    $nodesCount = $summary.NodesCount
+
+    #max in groups while min in original data. otherwise min was zero in empty data cells
+    $firstCol = ($timeline.Keys | Measure-Object -Minimum).Minimum
+    $lastCol = ($timeline.Keys | Measure-Object -Maximum).Maximum
+    
+    #data bounds
+    $dataMin = 0
+    $dataMax = ($timeline.Values | Measure-Object -Maximum).Maximum
+
+    if (($null -eq $dataMax) -or ($dataMax -eq 0)) { 
+        Write-Host -ForegroundColor Red ("{0}: no data" -f $title)
+        return
+    }
+    elseif ($dataMax -eq $dataMin) { $rowWidth = $dataMax / $height}
+    else { $rowWidth = ($dataMax - $dataMin) / $height }
+
+    $graph = New-Object System.Collections.Generic.List[string]
+
+    #workaround for bad text editors
+    $pseudoGraphicsSymbols = [System.Text.Encoding]::UTF8.GetString(([byte]226, 148,148,226,148,130,45,226,148,128))
+    if ($pseudoGraphicsSymbols.Length -ne 4) { throw "Error with pseudoGraphicsSymbols" }
+    $sb = New-Object System.Text.StringBuilder(1)
+    $firstCol..$lastCol | ForEach-Object { 
+        $sb.Append(("{0:00} " -f $_)) | Out-Null
+    } 
+    $graph.Add(" " + $sb.ToString())
+    $graph.Add($pseudoGraphicsSymbols[0].ToString().PadRight($lastCol*3 + 1, $pseudoGraphicsSymbols[3]))
+
+
+    1..$height | ForEach-Object {
+        $r = $_
+        $line = "│"
+        $firstCol..$lastCol | ForEach-Object {
+            $c = $_
+            $v = $timeline[$c]
+            $h = $v / $rowWidth
+            if ($h -ge $r ) {$line+="-- "}
+            else {$line+="   "}
+        }
+        $graph.Add($line) 
+    }
+    $graph.Reverse()
+
+    Write-Host $title -NoNewline -ForegroundColor Yellow
+    if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
+    Write-Host
+    Write-Host ("Y-axis from {0} to {1}h; cell = {2}h; {3} nodes" -f (HumanBytes -bytes $dataMin -dec), (HumanBytes -bytes $dataMax -dec), (HumanBytes -bytes $rowWidth -dec), $nodesCount) -ForegroundColor Gray
+    $graph | ForEach-Object {Write-Host $_}
+  
+    $total = ($timeline.Values | Measure-Object -Sum).Sum
+    Write-Host (" - total {0}h" -f ( HumanBytes -bytes $total -dec ) )
+    Write-Host
+}
+
 
 function DisplaySat {
     param ($nodes, $bw, $query, $config)
@@ -2217,6 +2354,16 @@ function GetQuery {
     return $query
 }
 
+function GetSummary {
+    param ($nodes)
+    $summary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+    $summary | Add-Member -NotePropertyName NodesCount -NotePropertyValue $nodes.Count
+    $daily = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty storageDaily
+    $timeline = GetDailyTimeline -daily $daily
+    $summary | Add-Member -NotePropertyName RestByDay -NotePropertyValue $timeline
+    return $summary
+}
+
 Preamble
 if ($args.Contains("example")) {
     $config = DefaultConfig
@@ -2226,14 +2373,15 @@ if ($args.Contains("example")) {
 
 $config = LoadConfig -cmdlineArgs $args
 #DEBUG
-#$config = LoadConfig -cmdlineArgs "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
+#$config = LoadConfig -cmdlineArgs $args
 
 if (-not $config) { return }
 
 $query = GetQuery -cmdlineArgs $args
 $nodes = GetNodes -config $config -query $query
 $score = GetScore -nodes $nodes
-$bwsummary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+$bwsummary = GetSummary -nodes $nodes
 $query.EndData = [DateTimeOffset]::Now
 $payments = $null
 if ($null -ne $config.Payout) { 
@@ -2258,6 +2406,7 @@ elseif ($args.Contains("testmail")) {
 elseif ($nodes.Count -gt 0) {
     if ($null -eq $query.Days -or $query.Days -gt 0) {
         DisplaySat -nodes $nodes -query $query -config $config
+        GraphRest -summary $bwsummary
         DisplayScore -score $score -bwsummary $bwsummary
         DisplayTraffic -nodes $nodes -query $query -config $config
     }
@@ -2278,4 +2427,4 @@ elseif ($nodes.Count -gt 0) {
 
 #DEBUG
 #cd C:\Projects\Repos\Storj
-#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -np -p all
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -p all
