@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.7"
+$v = "0.9.8"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -182,9 +182,12 @@ $v = "0.9.7"
 #               -   congratulations on the day of Victory over the most terrible evil in the known history of mankind
 #               -   add "Disk space used this month" graph for all nodes
 #               -   add current earnings with held and paid, disk and egress
+# v0.9.8   - 202005020
+#               -   add per satellite storage graph
+#               -   add per satellite nodes payouts
 
 
-# TODO v0.9.8
+# TODO v0.9.9
 #               -   add held amount rate
 #               -   fix () without wellknown nodes
 #               -   add current earnings
@@ -582,6 +585,9 @@ function FixDateSat {
     for ($i=0; $i -lt $sat.bandwidthDaily.Length; $i++) {
         $sat.bandwidthDaily[$i].intervalStart = [DateTimeOffset]$sat.bandwidthDaily[$i].intervalStart
     }
+    for ($i=0; $i -lt $sat.storageDaily.Length; $i++) {
+        $sat.storageDaily[$i].intervalStart = [DateTimeOffset]$sat.storageDaily[$i].intervalStart
+    }
     $sat.nodeJoinedAt = [DateTimeOffset]$sat.nodeJoinedAt
 }
 
@@ -807,6 +813,8 @@ function QueryNode
                 ([System.DateTimeOffset]::Now.Year.ToString() + "-" + [System.DateTimeOffset]::Now.Month.ToString()) `
                 ) -timeout $config.TimeoutSec
             
+            $paym | Add-Member -NotePropertyName NodeId -NotePropertyValue $dash.nodeID
+            $paym | Add-Member -NotePropertyName Node -NotePropertyValue $name
             $dash.Payments = $paym
             $dash.Held = ($paym | Measure-Object -Sum held).Sum
             $dash.Paid = ($paym | Measure-Object -Sum paid).Sum
@@ -921,6 +929,87 @@ function AggBandwidth
         Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
     }
 }
+
+function AggPayments
+{
+    [CmdletBinding()]
+    Param(
+          [Parameter(ValueFromPipeline)]
+          $item
+         )    
+    begin {
+        [long]$usageAtRest = 0
+        [long]$usageGet = 0
+        [long]$usagePut = 0
+        [long]$usageGetRepair = 0
+        [long]$usagePutRepair = 0
+        [long]$usageGetAudit = 0
+        [long]$compAtRest = 0
+        [long]$compGet = 0
+        [long]$compPut = 0
+        [long]$compGetRepair = 0
+        [long]$compPutRepair = 0
+        [long]$compGetAudit = 0
+        [long]$surgePercentMin = 0
+        [long]$surgePercentMax = 0
+        [long]$held = 0
+        [long]$owed = 0
+        [long]$disposed = 0
+        [long]$paid = 0
+        $from = $null
+        $to = $null
+
+        [long]$maxearned = 0
+    }
+    process {
+        $usageAtRest +=$item.usageAtRest
+        $usageGet +=$item.usageGet
+        $usagePut +=$item.usagePut
+        $usageGetRepair +=$item.usageGetRepair
+        $usagePutRepair +=$item.usagePutRepair
+        $usageGetAudit +=$item.usageGetAudit
+        $compAtRest +=$item.compAtRest
+        $compGet +=$item.compGet
+        $compPut +=$item.compPut
+        $compGetRepair +=$item.compGetRepair
+        $compPutRepair +=$item.compPutRepair
+        $compGetAudit +=$item.compGetAudit
+        $held +=$item.held
+        $owed +=$item.owed
+        $disposed +=$item.disposed
+        $paid +=$item.paid
+
+        if (($item.paid + $item.held) -gt $maxearned) { $maxearned = ($item.paid + $item.held)}
+
+        $surgePercentMin = $null
+        $surgePercentMax = $null
+        $from = $null
+        $to = $null
+    }
+    end {
+        $p = @{
+            'usageAtRest'       = $usageAtRest
+            'usageGet'          = $usageGet
+            'usagePut'          = $usagePut
+            'usageGetRepair'    = $usageGetRepair
+            'usagePutRepair'    = $usagePutRepair
+            'usageGetAudit'     = $usageGetAudit
+            'compAtRest'        = $compAtRest
+            'compGet'           = $compGet
+            'compPut'           = $compPut
+            'compGetRepair'     = $compGetRepair
+            'compPutRepair'     = $compPutRepair
+            'compGetAudit'      = $compGetAudit
+            'held'              = $held
+            'owed'              = $owed
+            'disposed'          = $disposed
+            'paid'              = $paid
+            'maxEarned'         = $maxearned
+        }
+        Write-Output (New-Object -TypeName PSCustomObject –Prop $p)
+    }
+}
+
 
 function ConvertRepair
 {
@@ -1543,22 +1632,6 @@ function DisplayNodes {
             @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}} `
             | Out-String -Width 200
         }
-
-        # $_.Group | Sort-Object Name | Format-Table -AutoSize `
-        # @{n="Node"; e={$_.Name}}, `
-        # @{n="Runtime"; e={[int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours)}}, `
-        # @{n="Ping"; e={HumanTime([DateTimeOffset]::Now - $_.lastPinged)}}, `
-        # @{n="Audit"; e={Round($_.Audit)}}, `
-        # @{n="UptimeF"; e={$_.Uptime}}, `
-        # @{n="[ Used  "; e={HumanBytes($_.diskSpace.used)}}, `
-        # @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.diskSpace.available -current $_.diskSpace.used)))}}, `
-        # @{n="Free ]"; e={HumanBytes(($_.diskSpace.available - $_.diskSpace.used))}}, `
-        # @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.BwSummary.Egress)), (HumanBytes($_.BwSummary.Egress)))}}, `
-        # @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.BwSummary.Ingress)), (HumanBytes($_.BwSummary.Ingress)))}}, `
-        # @{n="($) Held"; e={HumanBaks(($_.Held))}}, `
-        # @{n="Paid"; e={HumanBaks(($_.Paid))}}, `
-        # @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.HeldAcc + $bwsummary.Paid) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
-        # | Out-String -Width 200
     }
 
     $vetting = $nodes | Select-Object -ExpandProperty Sat `
@@ -1909,7 +1982,7 @@ function GraphRest
     }
     $graph.Reverse()
 
-    Write-Host $title -NoNewline -ForegroundColor Yellow
+    Write-Host $title -NoNewline #-ForegroundColor Yellow
     if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
     Write-Host
     Write-Host ("Y-axis from {0} to {1}h; cell = {2}h; {3} nodes" -f (HumanBytes -bytes $dataMin -dec), (HumanBytes -bytes $dataMax -dec), (HumanBytes -bytes $rowWidth -dec), $nodesCount) -ForegroundColor Gray
@@ -1942,6 +2015,53 @@ function DisplaySat {
             GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
         }
         GraphTimelineDirect -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
+
+        # Display storage graph for this satellite
+        $daily =  $sat.Group | Select-Object -ExpandProperty Storagedaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
+        $timeline = GetDailyTimeline -daily $daily
+        $satrest = New-Object -TypeName PSCustomObject
+        $satrest | Add-Member -NotePropertyName RestByDay -NotePropertyValue $timeline
+        GraphRest -summary $satrest
+
+        # Display payments for this satellite
+        if ($null -ne $config.Payout) {
+            $tab = [System.Collections.Generic.List[PSCustomObject]]@()
+            $payments = $nodes | Select-Object -ExpandProperty Payments | Where-Object { $_.satelliteId -eq $sat.Name }
+            $paymentsByNode = $payments | Group-Object Node
+
+            $paymentsByNode | ForEach-Object {
+                $np= $_
+                $npp = $np.Group | AggPayments
+                $p = @{
+                    'Count'                = $np.Count
+                    'Node'              = $np.Name
+                    'Held'             = $npp.held
+                    'Paid'             = $npp.paid
+                    'Earned'    = $npp.held + $npp.paid
+
+                }
+                $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
+            }
+            $maxEarned = ($tab | Measure-Object -Maximum Earned).Maximum
+            $sum = $payments | AggPayments
+
+            
+            $p = @{
+                'Count' = $sum.Count
+                'Node'  = "All nodes"
+                'Held'  = $sum.held
+                'Paid'  = $sum.paid
+                'Earned'= $sum.held + $sum.paid
+            }
+            $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
+            
+            $tab | Format-Table -AutoSize `
+                @{n="Node"; e={$_.Node}}, `
+                @{n="Held"; e={HumanBaks($_.Held)}}, `
+                @{n="Paid"; e={HumanBaks($_.Paid)}}, `
+                @{n="Earned"; e={("{0}{1}" -f ((GetPips -width 20 -max $maxEarned -current $_.Earned -condition ($_.Node -ne "All nodes")), (HumanBaks($_.Earned))))}} `
+            | Out-String -Width 200
+        }
 
         $vetting = $sat.Group `
         | Where-Object { $_.audit.totalCount -lt 100 } `
@@ -2222,7 +2342,7 @@ function GetPayments {
 
     [System.Collections.ArrayList]$dataFiltered = $null
     if ($config.Payout -eq 0) { $dataFiltered = $data | Where-Object {$_.Period -eq ("{0}-{1}" -f $now.Year, $now.Month)} }
-    elseif ($config.Payout -gt 0) { $dataFiltered = $data | Where-Object {$_.FirstDate -ge (GetFirstDate -date ([DateTimeOffset]::Now.AddMonths(($config.Payout * -1) + 1)))} }
+    elseif ($config.Payout -gt 0) { $dataFiltered = @($data | Where-Object {$_.FirstDate -ge (GetFirstDate -date ([DateTimeOffset]::Now.AddMonths(($config.Payout * -1) + 1)))})}
     elseif ($config.Payout -eq -1) { $dataFiltered = $data }
     else { throw "bad param -p (Payout)" }
 
@@ -2373,7 +2493,8 @@ if ($args.Contains("example")) {
 
 $config = LoadConfig -cmdlineArgs $args
 #DEBUG
-#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
+##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
 #$config = LoadConfig -cmdlineArgs $args
 
 if (-not $config) { return }
@@ -2406,6 +2527,7 @@ elseif ($args.Contains("testmail")) {
 elseif ($nodes.Count -gt 0) {
     if ($null -eq $query.Days -or $query.Days -gt 0) {
         DisplaySat -nodes $nodes -query $query -config $config
+        Write-Host -ForegroundColor Yellow "All Satellites" 
         GraphRest -summary $bwsummary
         DisplayScore -score $score -bwsummary $bwsummary
         DisplayTraffic -nodes $nodes -query $query -config $config
@@ -2427,4 +2549,4 @@ elseif ($nodes.Count -gt 0) {
 
 #DEBUG
 #cd C:\Projects\Repos\Storj
-#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -p all
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -p 2
