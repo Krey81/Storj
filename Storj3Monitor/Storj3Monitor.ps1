@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.9"
+$v = "0.9.10"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -188,6 +188,8 @@ $v = "0.9.9"
 # v0.9.9   - 202005020
 #               -   fix update grouping
 #               -   fix empty node name in quotes, thanks to @aleksandr_k
+# v0.9.10   - 202005020
+#               -   fix node name again
 
 
 # TODO v0.9.9
@@ -641,7 +643,6 @@ function GetNodeName{
     $cid = Compact($id)
     if ([String]::IsNullOrEmpty($nodeName)) { $nodeName = $cid }
     elseif (-not $config.HideNodeId) { $nodeName += " (" + $cid + ")" }
-    else {$nodeName = $cid }
     return $nodeName
 }
 
@@ -2558,6 +2559,6 @@ elseif ($nodes.Count -gt 0) {
 
 #DEBUG
 #cd C:\Projects\Repos\Storj
-#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -p 2
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -np
 #.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Alex.conf -np
 
