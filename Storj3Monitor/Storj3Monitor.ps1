@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.8"
+$v = "0.9.9"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -185,6 +185,9 @@ $v = "0.9.8"
 # v0.9.8   - 202005020
 #               -   add per satellite storage graph
 #               -   add per satellite nodes payouts
+# v0.9.9   - 202005020
+#               -   fix update grouping
+#               -   fix empty node name in quotes, thanks to @aleksandr_k
 
 
 # TODO v0.9.9
@@ -422,6 +425,8 @@ function Preamble{
     Write-Host ""
     Write-Host "Thanks Sans Kokor for bug hunting"
     Write-Host "Thanks underflow17"
+    Write-Host "Thanks aleksandr_k"
+    Write-Host "...and last but not least Dr_Odmin, 3bl3gamer"
     Write-Host "...and all STORJ Russian Chat members"
     Write-Host ""
 }
@@ -624,12 +629,20 @@ function FilterBandwidth {
     }
 }
 
+function Compact
+{
+    param($id)
+    return $id.Substring(0,4) + "-" + $id.Substring($id.Length-2)
+}
+
 function GetNodeName{
     param ($config, $id)
-    $name = ($config.WellKnownNodes | Select-Object -ExpandProperty $id)
-    if ([String]::IsNullOrEmpty($name)) { $name = Compact($id) }
-    elseif (-not $config.HideNodeId) {$name+= " (" + (Compact($id)) + ")"}
-    return $name
+    $nodeName = ($config.WellKnownNodes | Select-Object -ExpandProperty $id)
+    $cid = Compact($id)
+    if ([String]::IsNullOrEmpty($nodeName)) { $nodeName = $cid }
+    elseif (-not $config.HideNodeId) { $nodeName += " (" + $cid + ")" }
+    else {$nodeName = $cid }
+    return $nodeName
 }
 
 function GetSatName{
@@ -1148,12 +1161,6 @@ function GetScore
     $score
 }
 
-function Compact
-{
-    param($id)
-    return $id.Substring(0,4) + "-" + $id.Substring($id.Length-2)
-}
-
 function Round
 {
     param($value)
@@ -1208,7 +1215,7 @@ function CheckNodes{
     $failNodes = ($oldNodes | Where-Object { ($newNodes | Select-Object -ExpandProperty nodeID) -notcontains $_.nodeID })
     if ($failNodes.Count -gt 0) {
         $failNodes | ForEach-Object {
-            $nodeName = (GetNodeName -id $_.nodeID -config $config)
+            $nodeName = ( GetNodeName -config $config -id $_.nodeID  )
             Write-Output ("Disconnected from node {0}" -f $nodeName) | Tee-Object -Append -FilePath $body
         }
     }
@@ -1561,9 +1568,9 @@ function DisplayNodes {
     $latest = $nodes | Where-Object {$null -ne $_.LastVersion } | Select-Object -ExpandProperty LastVersion -First 1
     $minimal = $nodes | Where-Object {$null -ne $_.MinimalVersion } | Select-Object -ExpandProperty MinimalVersion -First 1
 
-    $tab = [System.Collections.Generic.List[PSCustomObject]]@()
     $nodes | Group-Object Version | ForEach-Object {
         Write-Host -NoNewline ("storagenode version {0}" -f $_.Name)
+        $tab = [System.Collections.Generic.List[PSCustomObject]]@()
         if ($null -ne $latest) {
             if ((CompareVersion -v1 $minimal -v2 $latest) -gt 0) { 
                 Write-Host -ForegroundColor Red (" (Something wrong in satellite. Oldest version {0} greater than latest version {1})" -f $minimal, $latest)
@@ -2495,7 +2502,9 @@ $config = LoadConfig -cmdlineArgs $args
 #DEBUG
 ##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
+#$args = "-c", ".\ConfigSamples\Alex.conf", "-np"
 #$config = LoadConfig -cmdlineArgs $args
+
 
 if (-not $config) { return }
 
@@ -2550,3 +2559,5 @@ elseif ($nodes.Count -gt 0) {
 #DEBUG
 #cd C:\Projects\Repos\Storj
 #.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -p 2
+#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Alex.conf -np
+
