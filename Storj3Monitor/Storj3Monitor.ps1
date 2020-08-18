@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.10"
+$v = "0.9.11"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -182,14 +182,16 @@ $v = "0.9.10"
 #               -   congratulations on the day of Victory over the most terrible evil in the known history of mankind
 #               -   add "Disk space used this month" graph for all nodes
 #               -   add current earnings with held and paid, disk and egress
-# v0.9.8   - 202005020
+# v0.9.8   - 20200520
 #               -   add per satellite storage graph
 #               -   add per satellite nodes payouts
-# v0.9.9   - 202005020
+# v0.9.9   - 20200520
 #               -   fix update grouping
 #               -   fix empty node name in quotes, thanks to @aleksandr_k
-# v0.9.10   - 202005020
+# v0.9.10   - 20200520
 #               -   fix node name again
+# v0.9.11   - 20200818
+#               -   fix error if config contains only one node
 
 
 # TODO v0.9.9
@@ -2499,18 +2501,18 @@ if ($args.Contains("example")) {
     return
 }
 
-$config = LoadConfig -cmdlineArgs $args
 #DEBUG
 ##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
-#$args = "-c", ".\ConfigSamples\Alex.conf", "-np"
-#$config = LoadConfig -cmdlineArgs $args
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
 
+$config = LoadConfig -cmdlineArgs $args
 
 if (-not $config) { return }
 
 $query = GetQuery -cmdlineArgs $args
-$nodes = GetNodes -config $config -query $query
+$nodes = @(GetNodes -config $config -query $query)
 $score = GetScore -nodes $nodes
 $bwsummary = GetSummary -nodes $nodes
 $query.EndData = [DateTimeOffset]::Now
