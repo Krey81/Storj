@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.13"
+$v = "0.9.14"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -201,7 +201,9 @@ $v = "0.9.13"
 #               -   fix day earnings
 #               -   earnings pips in node summary take percent from max node
 #               -   add calculation for egress sum missmatch
-
+# v0.9.14   - 20200824
+#               -   remove r&a from egress in currend earnings
+#               -   remove calculation for egress sum missmatch
 
 # TODO v0.9.9
 #               -   add held amount rate
@@ -1690,19 +1692,6 @@ function DisplayFooter {
 
     GraphDailyTimeline -title "Day earnings" -timeline $bwsummary.PayByDay -nodesCount $nodes.Count
 
-    if ($null -ne $config.Payout) { 
-        $sat = $nodes | Select-Object -ExpandProperty Sat
-        $summarySum = ($sat | Select-Object -ExpandProperty egressSummary | Measure-Object -Sum).Sum
-        $byDaySum = ($sat | Select-Object -ExpandProperty bandwidthDaily | Select-Object egress | Measure-Object -Sum {$_.egress.usage}).Sum
-
-        $delta = $summarySum - $byDaySum
-        $deltaBaks = $delta / 1000000000000 * 20.0
-        if ($deltaBaks -gt 1) {
-            Write-Host -ForegroundColor Yellow ("Storj API data for egress summary and egress by days differs for {0} ({1:N2}$)" -f (HumanBytes($delta)), $deltaBaks)
-            Write-Host
-        }
-    }
-
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
 
     $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
@@ -1767,7 +1756,7 @@ function DisplayFooter {
                 HeldPercent =(GetHeldPercent -age $_.Age)
                 RestByDayTotal = $_.RestByDayTotal
                 Disk = $_.RestByDayTotal  / 1000000 / $hours * 1.50
-                Egress = $_.egressSummary / 1000000 * 20.0
+                Egress = ($_.egressSummary - $agb.RepairEgress - $agb.AuditEgress ) / 1000000 * 20.0
                 RA = ($agb.RepairEgress + $agb.AuditEgress) / 1000000 * 10.0
                 Earned = 0
                 Held = 0
