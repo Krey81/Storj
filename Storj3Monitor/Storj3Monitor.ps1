@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.11"
+$v = "0.9.13"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -192,6 +192,15 @@ $v = "0.9.11"
 #               -   fix node name again
 # v0.9.11   - 20200818
 #               -   fix error if config contains only one node
+# v0.9.12   - 20200820 ( private, experimental )
+#               -   fix error on absent payments for new nodes and parameter -p
+#               -   substract disposed from months earnings, fix summary
+#               -   add repair and audit to current earnings
+#               -   add БАБЛОМЕТР (experimental)
+# v0.9.13   - 20200824
+#               -   fix day earnings
+#               -   earnings pips in node summary take percent from max node
+#               -   add calculation for egress sum missmatch
 
 
 # TODO v0.9.9
@@ -427,7 +436,7 @@ function Preamble{
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
     Write-Host -ForegroundColor Gray "... see TODO comments in the script body"
     Write-Host ""
-    Write-Host "Thanks Sans Kokor for bug hunting"
+    Write-Host "Thanks Sans Kokor, DmitryOligarch for bug hunting"
     Write-Host "Thanks underflow17"
     Write-Host "Thanks aleksandr_k"
     Write-Host "...and last but not least Dr_Odmin, 3bl3gamer"
@@ -829,11 +838,16 @@ function QueryNode
                 ([System.DateTimeOffset]::Now.Year.ToString() + "-" + [System.DateTimeOffset]::Now.Month.ToString()) `
                 ) -timeout $config.TimeoutSec
             
-            $paym | Add-Member -NotePropertyName NodeId -NotePropertyValue $dash.nodeID
-            $paym | Add-Member -NotePropertyName Node -NotePropertyValue $name
-            $dash.Payments = $paym
-            $dash.Held = ($paym | Measure-Object -Sum held).Sum
-            $dash.Paid = ($paym | Measure-Object -Sum paid).Sum
+            if ($null -ne $paym) {
+                $paym | Add-Member -NotePropertyName NodeId -NotePropertyValue $dash.nodeID
+                $paym | Add-Member -NotePropertyName Node -NotePropertyValue $name
+                $dash.Payments = $paym
+                $dash.Held = ($paym | Measure-Object -Sum {$_.held - $_.disposed}).Sum
+                $dash.Paid = ($paym | Measure-Object -Sum paid).Sum
+            }
+            else { 
+                Write-Host -ForegroundColor Red ("Failed to get payment {0}: no data from satellite" -f $address )
+            }
         }
         catch {
             Write-Error ("Failed to get payment {0}: {1}" -f $address, $_.Exception.Message )
@@ -913,6 +927,7 @@ function AggBandwidth
         [long]$delete = 0
         [long]$repairIngress = 0
         [long]$repairEgress = 0
+        [long]$auditEgress = 0
         $from = $null
         $to = $null
     }
@@ -922,6 +937,7 @@ function AggBandwidth
         $delete+= $item.delete
         $repairIngress+=$item.ingress.repair
         $repairEgress+=$item.egress.repair
+        $auditEgress+=$item.egress.audit
 
         if ($null -eq $from) { $from = $item.intervalStart}
         elseif ($item.intervalStart -lt $from) { $from = $item.intervalStart}
@@ -938,6 +954,7 @@ function AggBandwidth
             'Delete'   = $delete
             'RepairIngress' = $repairIngress
             'RepairEgress' = $repairEgress
+            'AuditEgress' = $auditEgress
             'MaxRepairBandwidth'= [Math]::Max($repairIngress, $repairEgress)
             'From'     = $from
             'To'       = $to
@@ -995,7 +1012,7 @@ function AggPayments
         $disposed +=$item.disposed
         $paid +=$item.paid
 
-        if (($item.paid + $item.held) -gt $maxearned) { $maxearned = ($item.paid + $item.held)}
+        if (($item.paid + $item.held - $item.disposed) -gt $maxearned) { $maxearned = ($item.paid + $item.held - $item.disposed)}
 
         $surgePercentMin = $null
         $surgePercentMax = $null
@@ -1062,6 +1079,7 @@ function AggBandwidth2
         $delete = 0
         $deleteMax = 0
         $repairEgress = 0
+        $auditEgress = 0
         $repairIngress = 0
         $from = $null
         $to = $null
@@ -1078,6 +1096,7 @@ function AggBandwidth2
 
         $repairEgress+=$item.RepairEgress
         $repairIngress+=$item.RepairIngress
+        $auditEgress+=$item.AuditEgress
 
         if ($null -eq $from) { $from = $item.From}
         elseif ($item.From -lt $from) { $from = $item.From}
@@ -1095,6 +1114,7 @@ function AggBandwidth2
             'DeleteMax'     = $deleteMax
             'RepairEgress'  = $repairEgress
             'RepairIngress' = $repairIngress
+            'AuditEgress'   = $auditEgress
             'Bandwidth'     = $ingress + $egress
             'From'          = $from
             'To'            = $to
@@ -1625,7 +1645,7 @@ function DisplayNodes {
             @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}}, `
             @{n="($) Held"; e={HumanBaks(($_.Held))}}, `
             @{n="Paid"; e={HumanBaks(($_.Paid))}}, `
-            @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.HeldAcc + $bwsummary.Paid) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
+            @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.MaxNodeEarned) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
             | Out-String -Width 200
         }
         else {
@@ -1667,23 +1687,41 @@ function GetHeldPercent
 
 function DisplayFooter {
     param ($nodes, $bwsummary, $config)
+
+    GraphDailyTimeline -title "Day earnings" -timeline $bwsummary.PayByDay -nodesCount $nodes.Count
+
+    if ($null -ne $config.Payout) { 
+        $sat = $nodes | Select-Object -ExpandProperty Sat
+        $summarySum = ($sat | Select-Object -ExpandProperty egressSummary | Measure-Object -Sum).Sum
+        $byDaySum = ($sat | Select-Object -ExpandProperty bandwidthDaily | Select-Object egress | Measure-Object -Sum {$_.egress.usage}).Sum
+
+        $delta = $summarySum - $byDaySum
+        $deltaBaks = $delta / 1000000000000 * 20.0
+        if ($deltaBaks -gt 1) {
+            Write-Host -ForegroundColor Yellow ("Storj API data for egress summary and egress by days differs for {0} ({1:N2}$)" -f (HumanBytes($delta)), $deltaBaks)
+            Write-Host
+        }
+    }
+
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
 
     $used = ($nodes.diskspace.used | Measure-Object -Sum).Sum
     $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
 
     $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart.UtcDateTime.Date -eq [DateTimeOffset]::UtcNow.UtcDateTime.Date} | AggBandwidth 
-    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress" -f 
-        (HumanBytes($today.Egress + $today.Ingress)), 
+    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, {3} R&A" -f 
+        (HumanBytes($today.Egress + $today.Ingress + $today.RepairEgress + $today.AuditEgress)), 
         (HumanBytes($today.Egress)), 
-        (HumanBytes($today.Ingress))
+        (HumanBytes($today.Ingress)),
+        (HumanBytes($today.RepairEgress + $today.AuditEgress))
         #,(HumanBytes($today.Delete))
     )
 
-    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress" -f 
-    (HumanBytes($bwsummary.Egress + $bwsummary.Ingress)), 
+    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, {3} R&A" -f 
+    (HumanBytes($bwsummary.Egress + $bwsummary.Ingress + $bwsummary.RepairEgress + $bwsummary.AuditEgress)), 
     (HumanBytes($bwsummary.Egress)), 
-    (HumanBytes($bwsummary.Ingress))
+    (HumanBytes($bwsummary.Ingress)),
+    (HumanBytes($bwsummary.RepairEgress + $bwsummary.AuditEgress))
     #,(HumanBytes($bwsummary.Delete))
     )
 
@@ -1716,31 +1754,40 @@ function DisplayFooter {
         #priceModel       : @{EgressBandwidth=2000; RepairBandwidth=1000; AuditBandwidth=1000; DiskSpace=150}        
         $nm = ([DateTime]::Now).AddMonths(1)
         $hours = ((Get-Date -Year $nm.Year -Month $nm.Month -Day 1).AddDays(-1).Day) * 24
-        $currentPayments = $nodes | Select-Object -ExpandProperty Sat | ForEach-Object { New-Object PSCustomObject -Property @{
-            Node = $_.NodeName
-            Sat = $_.Name
-            Age = $_.Age
-            HeldPercent =(GetHeldPercent -age $_.Age)
-            RestByDayTotal = $_.RestByDayTotal
-            Disk = ((($_.RestByDayTotal  / 1000000) / $hours) * 1.5)
-            Egress = ($_.egressSummary / 1000000) * 20
-            Earned = 0
-            Held = 0
-            Paid = 0
-        }}
+
+        #$nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
+
+        #TODO add R&A
+        $currentPayments = $nodes | Select-Object -ExpandProperty Sat | ForEach-Object { 
+            $agb = $_.BandwidthDaily | AggBandwidth
+            New-Object PSCustomObject -Property @{
+                Node = $_.NodeName
+                Sat = $_.Name
+                Age = $_.Age
+                HeldPercent =(GetHeldPercent -age $_.Age)
+                RestByDayTotal = $_.RestByDayTotal
+                Disk = $_.RestByDayTotal  / 1000000 / $hours * 1.50
+                Egress = $_.egressSummary / 1000000 * 20.0
+                RA = ($agb.RepairEgress + $agb.AuditEgress) / 1000000 * 10.0
+                Earned = 0
+                Held = 0
+                Paid = 0
+            }
+        }
         $currentPayments | ForEach-Object {
-            $_.Earned = $_.Disk + $_.Egress
+            $_.Earned = $_.Disk + $_.Egress + $_.RA
             $_.Held = $_.Earned * $_.HeldPercent
             $_.Paid = $_.Earned - $_.Held
         }
 
         $disk = (HumanBaks -value (($currentPayments | Measure-Object -Sum Disk).Sum))
         $egress = (HumanBaks -value (($currentPayments | Measure-Object -Sum Egress).Sum))
+        $ra = (HumanBaks -value (($currentPayments | Measure-Object -Sum RA).Sum))
         $earned = (HumanBaks -value (($currentPayments | Measure-Object -Sum Earned).Sum))
         $held = (HumanBaks -value (($currentPayments | Measure-Object -Sum Held).Sum))
         $paid = (HumanBaks -value (($currentPayments | Measure-Object -Sum Paid).Sum))
 
-        Write-Output ("Current month earnings {0}$ - {1}$ held, {2}$ paid ({3}$ storage, {4}$ egress)" -f $earned, $held, $paid, $disk, $egress)
+        Write-Output ("Current month earnings {0}$ - {1}$ held, {2}$ paid ({3}$ storage, {4}$ egress, {5}$ R&A)" -f $earned, $held, $paid, $disk, $egress, $ra)
 
         if ($null -ne $bwsummary.EtherSum -and $bwsummary.EtherSum -gt 0) { $tokens = ("({0} STORJ)" -f [Math]::Round($bwsummary.EtherSum,0)) }
         else { $tokens = "" }
@@ -1942,13 +1989,31 @@ function GraphTimeline
     Write-Host
 }
 
+# function GraphDailyTimeline
+# {
+
+# }
+
+# function GraphRest
+# {
+#     param ($summary)
+#     $height = 10
+#     $title = "Disk space used this month"
+#     $timeline = $summary.RestByDay
+#     $nodesCount = $summary.NodesCount
+
+
 function GraphRest
 {
     param ($summary)
+    GraphDailyTimeline -title "Disk space used this month" -timeline $summary.RestByDay -nodesCount $summary.NodesCount -unit "bytes"
+}
+
+
+function GraphDailyTimeline
+{
+    param ($title, $timeline, $nodesCount, $unit)
     $height = 10
-    $title = "Disk space used this month"
-    $timeline = $summary.RestByDay
-    $nodesCount = $summary.NodesCount
 
     #max in groups while min in original data. otherwise min was zero in empty data cells
     $firstCol = ($timeline.Keys | Measure-Object -Minimum).Minimum
@@ -1995,11 +2060,21 @@ function GraphRest
     Write-Host $title -NoNewline #-ForegroundColor Yellow
     if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
     Write-Host
-    Write-Host ("Y-axis from {0} to {1}h; cell = {2}h; {3} nodes" -f (HumanBytes -bytes $dataMin -dec), (HumanBytes -bytes $dataMax -dec), (HumanBytes -bytes $rowWidth -dec), $nodesCount) -ForegroundColor Gray
+    if ($unit -eq "bytes") {
+        Write-Host ("Y-axis from {0} to {1}h; cell = {2}h; {3} nodes" -f (HumanBytes -bytes $dataMin -dec), (HumanBytes -bytes $dataMax -dec), (HumanBytes -bytes $rowWidth -dec), $nodesCount) -ForegroundColor Gray
+    }
+    else {
+        Write-Host ("Y-axis from {0} to {1:N2}; cell = {2:N2}; {3} nodes" -f $dataMin, $dataMax, $rowWidth, $nodesCount) -ForegroundColor Gray    
+    }
     $graph | ForEach-Object {Write-Host $_}
   
     $total = ($timeline.Values | Measure-Object -Sum).Sum
-    Write-Host (" - total {0}h" -f ( HumanBytes -bytes $total -dec ) )
+    if ($unit -eq "bytes") {
+        Write-Host (" - total {0}h" -f ( HumanBytes -bytes $total -dec ) )
+    }
+    else {
+        Write-Host (" - total {0:N2}" -f $total)
+    }
     Write-Host
 }
 
@@ -2245,8 +2320,12 @@ function GetPayments {
         $surgeMax = ($_.Group | Measure-Object -Max surgePercent).Maximum
         if ($surgeMin -eq $surgeMax) { $surge = $surgeMin.ToString() }
         else { $surge = ("{0}-{1}" -f $surgeMin, $surgeMax) }
+
+        #Any held amount payback. In this example graceful exit. It will also show the 50% payback in month 15
+        $dispM = ($_.Group | Measure-Object -Sum disposed).Sum
+
         $heldM = ($_.Group | Measure-Object -Sum held).Sum
-        $heldAcc+=$heldM
+        $heldAcc += $heldM - $dispM
 
         #For pwsh 5
         #$gra = ($_.Group | Measure-Object -Sum { $_.usageGetRepair + $_.usageGetAudit}).Sum
@@ -2283,7 +2362,7 @@ function GetPayments {
             $iF = SafeRound -nominator $ingress -denominator $prev.Put -decimals 2
             $eF = SafeRound -nominator $egress -denominator $prev.Get -decimals 2
             $epF = SafeRound -nominator $egressPayment -denominator $prev.GetPayment -decimals 2
-            $erF = SafeRound -nominator ($paid + $heldM) -denominator $prev.Earned -decimals 2
+            $erF = SafeRound -nominator ($paid + $heldM - $dispM) -denominator $prev.Earned -decimals 2
         }
 
         if ($egress -gt $ingress) { 
@@ -2320,9 +2399,9 @@ function GetPayments {
             'HeldThisMonth'         = $heldM #Held amount depending on the node age
             'HeldAcc'               = $heldAcc
             'Owed'                  = ($_.Group | Measure-Object -Sum owed).Sum #Payout reduced by held amount
-            'Disposed'              = ($_.Group | Measure-Object -Sum disposed).Sum #Any held amount payback. In this example graceful exit. It will also show the 50% payback in month 15
+            'Disposed'              = $dispM  
             'Paid'                  = $paid #Final payment for usage + held amount
-            'Earned'                = $heldM + $paid
+            'Earned'                = $heldM + $paid - $dispM
             'erF'                   = $erF
             'EtherCount'            = $etherCount
             'EtherSum'              = $etherSum
@@ -2361,6 +2440,8 @@ function GetPayments {
         return
     }
 
+    $sum_HeldM = ($dataFiltered | Measure-Object -Sum HeldThisMonth).Sum
+    $sum_Disposed = ($dataFiltered | Measure-Object -Sum Disposed).Sum
     $paySummary = @{
         'Period'                = ("{0}m" -f ($dataFiltered | Measure-Object).Count)
         'RecordCount'           = ($dataFiltered | Measure-Object -Sum RecordCount).Sum
@@ -2376,9 +2457,9 @@ function GetPayments {
         'PutRepairPayment'      = ($dataFiltered | Measure-Object -Sum PutRepairPayment).Sum
         'Surge'                 = ""
         'HeldThisMonth'         = ""
-        'HeldAcc'               = ($dataFiltered | Measure-Object -Sum HeldThisMonth).Sum
+        'HeldAcc'               = ($sum_HeldM - $sum_Disposed)
         'Owed'                  = ($dataFiltered | Measure-Object -Sum Owed).Sum
-        'Disposed'              = ($dataFiltered | Measure-Object -Sum Disposed).Sum
+        'Disposed'              = $sum_Disposed
         'Paid'                  = ($dataFiltered | Measure-Object -Sum Paid).Sum
         'EtherCount'            = ($dataFiltered | Measure-Object -Sum EtherCount).Sum
         'EtherSum'              = ($dataFiltered | Measure-Object -Sum EtherSum).Sum
@@ -2428,24 +2509,26 @@ function DisplayPayments {
     @{n="HeldAcc"; e={HumanBaks($_.HeldAcc)}}, `
     @{n="Held(month)"; e={HumanBaks($_.HeldThisMonth)}}, `
     @{n="Paid"; e={HumanBaks($_.Paid)}}, `
-    @{n="Earned        "; e={("{0} {1}" -f ((GetPips -width 12 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid) -condition ($_.Period.IndexOf("-") -gt 0)), (HumanBaks(($_.HeldThisMonth + $_.Paid)))))}}, `
+    @{n="Earned(month) "; e={("{0} {1}" -f ((GetPips -width 12 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid - $_.Disposed) -condition ($_.Period.IndexOf("-") -gt 0)), (HumanBaks(($_.HeldThisMonth + $_.Paid - $_.Disposed)))))}}, `
     @{n="EtherCount"; e={$_.EtherCount}}, `
     @{n="EtherSum"; e={[Math]::Round($_.EtherSum, 2)}}
 }
 
 function DisplayRelativePayments {
     param ($payments, $summary)
-    Write-Host Relative payments
-    $payments | Where-Object {$_.Period.Contains("-") -and ($_.RecordCount -gt 0)} | Format-Table -AutoSize `
-    @{n="Period"; e={$_.Period}}, `
-    @{n="Surge"; e={$_.Surge}}, `
-    @{n="Storage, gF"; e={(GetPips -width 14 -max $summary.StorageMaximum -current $_.StorageAvgMonth) + $_.gF.ToString() }}, `
-    @{n="Storage payment"; e={(GetPips -width 14 -max $summary.StoragePaymentMaximum -current $_.StoragePayment) + $_.gpF.ToString()}}, `
-    @{n="Ingress"; e={(GetPips -width 14 -max $summary.IngressMaximum -current $_.Put)  + $_.iF.ToString()}}, `
-    @{n="Dir"; e={$_.Dir}}, `
-    @{n="Egress"; e={(GetPips -width 14 -max $summary.EgressMaximum -current $_.Get) + $_.eF.ToString()}}, `
-    @{n="Egress payment"; e={(GetPips -width 14 -max $summary.EgressPaymentMaximum -current $_.GetPayment) + $_.epF.ToString()}}, `
-    @{n="Earned          "; e={(GetPips -width 14 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid)) + $_.erF.ToString()}}
+    if ($null -ne $payments) {
+        Write-Host Relative payments
+        $payments | Where-Object {$_.Period.Contains("-") -and ($_.RecordCount -gt 0)} | Format-Table -AutoSize `
+        @{n="Period"; e={$_.Period}}, `
+        @{n="Surge"; e={$_.Surge}}, `
+        @{n="Storage, gF"; e={(GetPips -width 14 -max $summary.StorageMaximum -current $_.StorageAvgMonth) + $_.gF.ToString() }}, `
+        @{n="Storage payment"; e={(GetPips -width 14 -max $summary.StoragePaymentMaximum -current $_.StoragePayment) + $_.gpF.ToString()}}, `
+        @{n="Ingress"; e={(GetPips -width 14 -max $summary.IngressMaximum -current $_.Put)  + $_.iF.ToString()}}, `
+        @{n="Dir"; e={$_.Dir}}, `
+        @{n="Egress"; e={(GetPips -width 14 -max $summary.EgressMaximum -current $_.Get) + $_.eF.ToString()}}, `
+        @{n="Egress payment"; e={(GetPips -width 14 -max $summary.EgressPaymentMaximum -current $_.GetPayment) + $_.epF.ToString()}}, `
+        @{n="Earned          "; e={(GetPips -width 14 -max $summary.EarnedMaximum -current ($_.HeldThisMonth + $_.Paid - $_.Disposed)) + $_.erF.ToString()}}
+    }
 }
 
 function GetQuery {
@@ -2484,13 +2567,59 @@ function GetQuery {
     return $query
 }
 
+function GetDailyPaymentTimeline {
+    param ($sat)
+    $nm = ([DateTime]::Now).AddMonths(1)
+    $hours = ((Get-Date -Year $nm.Year -Month $nm.Month -Day 1).AddDays(-1).Day) * 24
+
+    $stor = ($sat | Select-Object -ExpandProperty storageDaily)
+    $bw = $sat | Select-Object -ExpandProperty bandwidthDaily | Select-Object intervalStart, egress
+
+    $timeline = New-Object "System.Collections.Generic.SortedList[int, double]"
+
+    $times = (($stor | Select-Object -ExpandProperty intervalStart) + ($bw | Select-Object -ExpandProperty intervalStart)) | Select-Object -Unique | Sort-Object
+    $times | ForEach-Object {
+        $day = $_
+        $storageDaily = ($stor | Where-Object {$_.intervalStart -eq $day} | Measure-Object -Sum {$_.atRestTotal}).Sum / 1000000000000 / $hours * 1.50
+        $bandwidthDaily = ($bw | Where-Object {$_.intervalStart -eq $day} | Measure-Object -Sum {
+            ($_.egress.repair + $_.egress.audit) * 10.0 / 1000000000000 + 
+            $_.egress.usage * 20.0 / 1000000000000
+        }).Sum
+        $totalDaily = $storageDaily + $bandwidthDaily
+        $timeline.Add($day.Day, $totalDaily)
+    }
+    
+    #$timelineSum = ($timeline.Values | Measure-Object -Sum).Sum
+
+    $summarySum = ($sat | Select-Object -ExpandProperty egressSummary | Measure-Object -Sum).Sum # / 1000000000000
+    $byDaySum = ($bw | Measure-Object -Sum {$_.egress.usage}).Sum #/ 1000000000000
+    $delta = $summarySum - $byDaySum
+    $deltaBaks = $delta / 1000000000000 * 20.0
+
+    if ($deltaBaks -gt 1) {
+        Write-Host -ForegroundColor Yellow ("Storj API data for egress summary and egress by days differs for {0} ({1:N2}$)" -f (HumanBytes($delta)), $deltaBaks)
+    }
+
+    return $timeline
+}
+
 function GetSummary {
     param ($nodes)
     $summary = ($nodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
     $summary | Add-Member -NotePropertyName NodesCount -NotePropertyValue $nodes.Count
-    $daily = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty storageDaily
+
+    $sat = $nodes | Select-Object -ExpandProperty Sat 
+
+    $daily = $sat | Select-Object -ExpandProperty storageDaily
     $timeline = GetDailyTimeline -daily $daily
     $summary | Add-Member -NotePropertyName RestByDay -NotePropertyValue $timeline
+
+    $dailyPayment = GetDailyPaymentTimeline -sat $sat
+    $summary | Add-Member -NotePropertyName PayByDay -NotePropertyValue $dailyPayment
+
+    $maxNodeEarned = ($nodes | Measure-Object -max {$_.Held + $_.Paid}).Maximum    
+    $summary | Add-Member -NotePropertyName MaxNodeEarned -NotePropertyValue $maxNodeEarned
+
     return $summary
 }
 
@@ -2505,7 +2634,7 @@ if ($args.Contains("example")) {
 ##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np"
-#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-p", "all"
 
 $config = LoadConfig -cmdlineArgs $args
 
