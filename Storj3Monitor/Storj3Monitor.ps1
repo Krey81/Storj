@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.14"
+$v = "0.9.15"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -204,6 +204,12 @@ $v = "0.9.14"
 # v0.9.14   - 20200824
 #               -   remove r&a from egress in currend earnings
 #               -   remove calculation for egress sum missmatch
+# v0.9.15   - 20200906
+#               -   change and compact totals output
+#               -   add estimate month earnings
+#               -   add days earnings to monitor output
+#               -   improve old powershell compatibles
+
 
 # TODO v0.9.9
 #               -   add held amount rate
@@ -406,12 +412,7 @@ function StartWebRequest
   $MemoryJob.Start()
   $MemoryJob
 }
-
-function CheckRepairDisplay{
-    param($config, $where)
-    return ($repairOptionValues.IndexOf($config.DisplayRepairOption) -ge $repairOptionValues.IndexOf($where))
-}
-    
+   
 function IsAnniversaryVersion {
     param($vstr)
     $standardBootleVolumeLitters = 0.5
@@ -425,6 +426,12 @@ function IsVictoryDay {
     if (($now.Month -eq 5) -and ($now.Day -eq 9)) { return $true }
     return $false
 }
+function IsBirthday {
+    $now = [System.DateTime]::Now
+    if (($now.Month -eq 9) -and ($now.Day -eq 14)) { return $true }
+    return $false
+}
+
 function Preamble{
     Write-Host ""
     Write-Host -NoNewline ("Storj3Monitor script by Krey ver {0}" -f $v)
@@ -433,6 +440,7 @@ function Preamble{
     if (IsVictoryDay) { Write-Host -ForegroundColor Green "GLORIOUS VICTORY"}
     Write-Host "mail-to: krey@irinium.ru"
     Write-Host "telegram: Krey81"
+    if (IsBirthday) { Write-Host -ForegroundColor Blue "THIS DAY IS KREY'S BIRTHDAY! "}
     Write-Host ""
     Write-Host -ForegroundColor Yellow "I work on beer. If you like my scripts please donate bottle of beer in STORJ or ETH to 0x7df3157909face2dd972019d590adba65d83b1d8"
     Write-Host -ForegroundColor Gray "Why should I send bootles if everything works like that ?"
@@ -934,12 +942,17 @@ function AggBandwidth
         $to = $null
     }
     process {
-        $ingress+=$item.ingress.usage
+        #egress
         $egress+= $item.egress.usage
-        $delete+= $item.delete
-        $repairIngress+=$item.ingress.repair
         $repairEgress+=$item.egress.repair
         $auditEgress+=$item.egress.audit
+
+        #ingress
+        $ingress+=$item.ingress.usage
+        $repairIngress+=$item.ingress.repair       
+
+
+        $delete+= $item.delete
 
         if ($null -eq $from) { $from = $item.intervalStart}
         elseif ($item.intervalStart -lt $from) { $from = $item.intervalStart}
@@ -1526,8 +1539,11 @@ function Monitor {
         if (($null -eq $config.Canary) -or ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -ge 10)) {
             $config.Canary = [System.DateTimeOffset]::Now
             Write-Output ("storj3monitor is alive {0}" -f $config.Canary) | Tee-Object -Append -FilePath $body
-            $bwsummary = ($newNodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+            #$bwsummary_old = ($newNodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
+            $bwsummary = GetSummary -nodes $newNodes
+
             DisplayScore -score $newScore -bwsummary $bwsummary >> $body
+            DisplayTraffic -nodes $newNodes -config $config >> $body
             DisplayNodes -nodes $newNodes -bwsummary $bwsummary -config $config >> $body
             DisplayFooter -nodes $newNodes -bwsummary $bwsummary -config $config >> $body
         }
@@ -1690,7 +1706,17 @@ function GetHeldPercent
 function DisplayFooter {
     param ($nodes, $bwsummary, $config)
 
-    GraphDailyTimeline -title "Day earnings" -timeline $bwsummary.PayByDay -nodesCount $nodes.Count
+    #special symbol 💵
+    GraphDailyTimeline -title "Day earnings" -timeline $bwsummary.PayByDay -nodesCount $nodes.Count -unit "baks"
+    if ($bwsummary.PayByDay.Count -gt 1) {
+        $nm = ([DateTime]::Now).AddMonths(1)
+        $days = ((Get-Date -Year $nm.Year -Month $nm.Month -Day 1).AddDays(-1).Day)
+        $dc = $bwsummary.PayByDay.Count -1
+        $avg = (($bwsummary.PayByDay.Values | Select-Object -First $dc) | Measure-Object -Sum).Sum / $dc
+        $est = $days * $avg
+        Write-Output (" - estimate at the end of the month {0:N2}" -f $est)
+    }
+    Write-Output ""
 
     Write-Output ("Stat time {0:yyyy.MM.dd HH:mm:ss (UTCzzz)}" -f [DateTimeOffset]::Now)
 
@@ -1698,32 +1724,29 @@ function DisplayFooter {
     $avail = ($nodes.diskspace.available | Measure-Object -Sum).Sum
 
     $today = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily | Where-Object {$_.intervalStart.UtcDateTime.Date -eq [DateTimeOffset]::UtcNow.UtcDateTime.Date} | AggBandwidth 
-    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, {3} R&A" -f 
-        (HumanBytes($today.Egress + $today.Ingress + $today.RepairEgress + $today.AuditEgress)), 
-        (HumanBytes($today.Egress)), 
-        (HumanBytes($today.Ingress)),
-        (HumanBytes($today.RepairEgress + $today.AuditEgress))
+
+    Write-Output ("Today bandwidth {0} - {1} Egress, {2} Ingress, include repair and audit {3} Egress, {4} Ingress" -f 
+        (HumanBytes($today.Egress + $today.RepairEgress + $today.AuditEgress + $today.Ingress + $today.RepairIngress)), 
+        (HumanBytes($today.Egress + $today.RepairEgress + $today.AuditEgress)), 
+        (HumanBytes($today.Ingress + $today.RepairIngress)),
+        (HumanBytes($today.RepairEgress + $today.AuditEgress)), 
+        (HumanBytes($today.RepairIngress))
         #,(HumanBytes($today.Delete))
     )
 
-    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, {3} R&A" -f 
-    (HumanBytes($bwsummary.Egress + $bwsummary.Ingress + $bwsummary.RepairEgress + $bwsummary.AuditEgress)), 
-    (HumanBytes($bwsummary.Egress)), 
-    (HumanBytes($bwsummary.Ingress)),
-    (HumanBytes($bwsummary.RepairEgress + $bwsummary.AuditEgress))
+    Write-Output ("Total bandwidth {0} - {1} Egress, {2} Ingress, include repair and audit {3} Egress, {4} Ingress" -f 
+    (HumanBytes($bwsummary.Egress  + $bwsummary.RepairEgress + $bwsummary.AuditEgress + $bwsummary.Ingress + $bwsummary.RepairIngress)), 
+    (HumanBytes($bwsummary.Egress  + $bwsummary.RepairEgress + $bwsummary.AuditEgress)), 
+    (HumanBytes($bwsummary.Ingress + $bwsummary.RepairIngress)),
+    (HumanBytes($bwsummary.RepairEgress + $bwsummary.AuditEgress)), 
+    (HumanBytes($bwsummary.RepairIngress))
     #,(HumanBytes($bwsummary.Delete))
     )
 
-    if (CheckRepairDisplay -config $config -where "totals") {
-        Write-Output ("Total repair {0} Egress, {1} Ingress" -f 
-            (HumanBytes($bwsummary.RepairEgress)), 
-            (HumanBytes($bwsummary.RepairIngress))
-        )
-    }
-
     Write-Output ("Total storage {0}; used {1}; available {2}" -f (HumanBytes($avail)), (HumanBytes($used)), (HumanBytes($avail-$used)))
 
-    Write-Output ("from {0:yyyy.MM.dd} to {1:yyyy.MM.dd} on {2} nodes" -f 
+    Write-Host
+    Write-Output ("From {0:yyyy.MM.dd} to {1:yyyy.MM.dd} on {2} nodes" -f 
         $bwsummary.From, 
         $bwsummary.To, 
         $nodes.Count
@@ -1978,24 +2001,11 @@ function GraphTimeline
     Write-Host
 }
 
-# function GraphDailyTimeline
-# {
-
-# }
-
-# function GraphRest
-# {
-#     param ($summary)
-#     $height = 10
-#     $title = "Disk space used this month"
-#     $timeline = $summary.RestByDay
-#     $nodesCount = $summary.NodesCount
-
-
 function GraphRest
 {
     param ($summary)
     GraphDailyTimeline -title "Disk space used this month" -timeline $summary.RestByDay -nodesCount $summary.NodesCount -unit "bytes"
+    Write-Output ""
 }
 
 
@@ -2013,7 +2023,7 @@ function GraphDailyTimeline
     $dataMax = ($timeline.Values | Measure-Object -Maximum).Maximum
 
     if (($null -eq $dataMax) -or ($dataMax -eq 0)) { 
-        Write-Host -ForegroundColor Red ("{0}: no data" -f $title)
+        Write-Output ("{0}: no data" -f $title)
         return
     }
     elseif ($dataMax -eq $dataMin) { $rowWidth = $dataMax / $height}
@@ -2039,32 +2049,34 @@ function GraphDailyTimeline
             $c = $_
             $v = $timeline[$c]
             $h = $v / $rowWidth
-            if ($h -ge $r ) {$line+="-- "}
+            if ($h -ge $r ) {
+                $line+="-- "
+                #if ($unit -eq "baks") {$line+="💵 "}
+                #else { $line+="-- " }
+            }
             else {$line+="   "}
         }
         $graph.Add($line) 
     }
     $graph.Reverse()
 
-    Write-Host $title -NoNewline #-ForegroundColor Yellow
-    if (-not [String]::IsNullOrEmpty($decription)) {Write-Host (" - {0}" -f $decription) -ForegroundColor Gray -NoNewline}
-    Write-Host
+    Write-Output $title #-NoNewline #-ForegroundColor Yellow
+    if (-not [String]::IsNullOrEmpty($decription)) { Write-Output (" - {0}" -f $decription) }
     if ($unit -eq "bytes") {
-        Write-Host ("Y-axis from {0} to {1}h; cell = {2}h; {3} nodes" -f (HumanBytes -bytes $dataMin -dec), (HumanBytes -bytes $dataMax -dec), (HumanBytes -bytes $rowWidth -dec), $nodesCount) -ForegroundColor Gray
+        Write-Output ("Y-axis from {0} to {1}h; cell = {2}h; {3} nodes" -f (HumanBytes -bytes $dataMin -dec), (HumanBytes -bytes $dataMax -dec), (HumanBytes -bytes $rowWidth -dec), $nodesCount) 
     }
     else {
-        Write-Host ("Y-axis from {0} to {1:N2}; cell = {2:N2}; {3} nodes" -f $dataMin, $dataMax, $rowWidth, $nodesCount) -ForegroundColor Gray    
+        Write-Output ("Y-axis from {0} to {1:N2}; cell = {2:N2}; {3} nodes" -f $dataMin, $dataMax, $rowWidth, $nodesCount)
     }
-    $graph | ForEach-Object {Write-Host $_}
+    $graph | ForEach-Object {Write-Output $_}
   
     $total = ($timeline.Values | Measure-Object -Sum).Sum
     if ($unit -eq "bytes") {
-        Write-Host (" - total {0}h" -f ( HumanBytes -bytes $total -dec ) )
+        Write-Output (" - total {0}h" -f ( HumanBytes -bytes $total -dec ) )
     }
     else {
-        Write-Host (" - total {0:N2}" -f $total)
+        Write-Output (" - total {0:N2}" -f $total)
     }
-    Write-Host
 }
 
 
@@ -2085,9 +2097,7 @@ function DisplaySat {
         $sat = $_
         $bw = $sat.Group | Select-Object -ExpandProperty bandwidthDaily | Where-Object { ($_.IntervalStart.Year -eq $now.Year) -and ($_.IntervalStart.Month -eq $now.Month)}
         $title = ("{0} ({1})" -f  $sat.Group[0].Url, $sat.Name)
-        if (CheckRepairDisplay -config $config -where "sat") {
-            GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
-        }
+        GraphTimelineRepair -title ('Repair ' + $title) -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
         GraphTimelineDirect -title $title -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
 
         # Display storage graph for this satellite
@@ -2156,12 +2166,8 @@ function DisplaySat {
 function DisplayTraffic {
     param ($nodes, $query, $config)
     $bw = $nodes | Select-Object -ExpandProperty Sat | Select-Object -ExpandProperty bandwidthDaily
-    if (CheckRepairDisplay -config $config -where "traffic") {
-        GraphTimelineRepair -title "Repair by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
-    }
+    GraphTimelineRepair -title "Repair by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
     GraphTimelineDirect -title "Traffic by days" -height 15 -bandwidth $bw -query $query -nodesCount $nodes.Count -config $config
-    
-
 }
 
 function GetFirstDate
@@ -2569,7 +2575,8 @@ function GetDailyPaymentTimeline {
     $times = (($stor | Select-Object -ExpandProperty intervalStart) + ($bw | Select-Object -ExpandProperty intervalStart)) | Select-Object -Unique | Sort-Object
     $times | ForEach-Object {
         $day = $_
-        $storageDaily = ($stor | Where-Object {$_.intervalStart -eq $day} | Measure-Object -Sum {$_.atRestTotal}).Sum / 1000000000000 / $hours * 1.50
+        #$storageDaily = ($stor | Where-Object {$_.intervalStart -eq $day} | Measure-Object -Sum {$_.atRestTotal}).Sum / 1000000000000 / $hours * 1.50
+        $storageDaily = ($stor | Where-Object {$_.intervalStart -eq $day} | Measure-Object -Sum atRestTotal).Sum / 1000000000000 / $hours * 1.50
         $bandwidthDaily = ($bw | Where-Object {$_.intervalStart -eq $day} | Measure-Object -Sum {
             ($_.egress.repair + $_.egress.audit) * 10.0 / 1000000000000 + 
             $_.egress.usage * 20.0 / 1000000000000
@@ -2581,7 +2588,8 @@ function GetDailyPaymentTimeline {
     #$timelineSum = ($timeline.Values | Measure-Object -Sum).Sum
 
     $summarySum = ($sat | Select-Object -ExpandProperty egressSummary | Measure-Object -Sum).Sum # / 1000000000000
-    $byDaySum = ($bw | Measure-Object -Sum {$_.egress.usage}).Sum #/ 1000000000000
+    #$byDaySum = ($bw | Measure-Object -Sum {$_.egress.usage}).Sum #/ 1000000000000
+    $byDaySum = ($bw | Select-Object -ExpandProperty egress | Select-Object -ExpandProperty usage | Measure-Object -Sum).Sum
     $delta = $summarySum - $byDaySum
     $deltaBaks = $delta / 1000000000000 * 20.0
 
@@ -2606,7 +2614,9 @@ function GetSummary {
     $dailyPayment = GetDailyPaymentTimeline -sat $sat
     $summary | Add-Member -NotePropertyName PayByDay -NotePropertyValue $dailyPayment
 
-    $maxNodeEarned = ($nodes | Measure-Object -max {$_.Held + $_.Paid}).Maximum    
+    #$maxNodeEarned = ($nodes | Measure-Object -max {$_.Held + $_.Paid}).Maximum
+    $maxNodeEarned = ($nodes | ForEach-Object { $_.Held + $_.Paid } | Measure-Object -Maximum).Maximum
+
     $summary | Add-Member -NotePropertyName MaxNodeEarned -NotePropertyValue $maxNodeEarned
 
     return $summary
@@ -2622,8 +2632,9 @@ if ($args.Contains("example")) {
 #DEBUG
 ##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
-#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-p", "all"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "monitor"
 
 $config = LoadConfig -cmdlineArgs $args
 
