@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.15"
+$v = "0.9.16"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -209,7 +209,9 @@ $v = "0.9.15"
 #               -   add estimate month earnings
 #               -   add days earnings to monitor output
 #               -   improve old powershell compatibles
-
+# v0.9.16   - 20200909
+#               -   add disposed sum in satellite details, so held in sat data must show current unpaid held
+#               -   add cmdline option -sat to filter output, example "-sat benten"
 
 # TODO v0.9.9
 #               -   add held amount rate
@@ -820,15 +822,22 @@ function QueryNode
             $rest = GetDailyTimeline -daily $sat.storageDaily
             $restTotal = ($rest.Values | Measure-Object -Sum).Sum
             
-            $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
-            $sat | Add-Member -NotePropertyName Name -NotePropertyValue (GetSatName -config $config -id $sat.id -url $sat.url)
-            $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
-            $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
-            $sat | Add-Member -NotePropertyName Susp -NotePropertyValue ($dashSat.suspended)
-            $sat | Add-Member -NotePropertyName Age -NotePropertyValue $age
-            $sat | Add-Member -NotePropertyName RestByDay -NotePropertyValue $rest
-            $sat | Add-Member -NotePropertyName RestByDayTotal -NotePropertyValue $restTotal
-            $dash.Sat.Add($sat)
+            $satName = (GetSatName -config $config -id $sat.id -url $sat.url)
+
+            if ($null -ne $query.Sat -and $satName -notmatch $query.Sat) {
+                Write-Host ("Sat {0} filtered" -f $satName)
+            }
+            else {
+                $sat | Add-Member -NotePropertyName Url -NotePropertyValue ($dashSat.url)
+                $sat | Add-Member -NotePropertyName Name -NotePropertyValue $satName
+                $sat | Add-Member -NotePropertyName NodeName -NotePropertyValue $name
+                $sat | Add-Member -NotePropertyName Dq -NotePropertyValue ($dashSat.disqualified)
+                $sat | Add-Member -NotePropertyName Susp -NotePropertyValue ($dashSat.suspended)
+                $sat | Add-Member -NotePropertyName Age -NotePropertyValue $age
+                $sat | Add-Member -NotePropertyName RestByDay -NotePropertyValue $rest
+                $sat | Add-Member -NotePropertyName RestByDayTotal -NotePropertyValue $restTotal
+                $dash.Sat.Add($sat)
+            }
         }
 
         $dash.PSObject.Properties.Remove('satellites')            
@@ -1160,6 +1169,7 @@ function GetScore
                 $satPayments = ($node.Payments | Where-Object { $_.satelliteId -eq $sat.id })
                 $held =  ($satPayments | Measure-Object -Sum held).Sum
                 $paid = ($satPayments | Measure-Object -Sum paid).Sum
+                $disposed = ($satPayments | Measure-Object -Sum disposed).Sum
 
                 $lastPaym = ($satPayments | Select-Object -Last 1)
                 if ($null -ne $lastPaym) { $codes = $lastPaym.codes }
@@ -1179,7 +1189,8 @@ function GetScore
                 Age = $sat.Age
                 Comment = [String]::Join("; ", $comment)
                 Codes = $codes
-                Held = $held
+                Disposed = $disposed
+                Held = $held - $disposed
                 Paid = $paid
             }
         }
@@ -1848,6 +1859,7 @@ function DisplayScore {
             'Audit'     = Round($_.Audit)
             'UptimeF'   = $_.Uptime
             'Joined'    = ("{0:yyyy-MM-dd} ({1,2})" -f $_.Joined, $_.Age)
+            'Disposed'  = HumanBaks($_.Disposed)
             'Held'      = HumanBaks($_.Held)
             'Paid'      = HumanBaks($_.Paid)
             'Codes'     = $_.Codes
@@ -1857,7 +1869,7 @@ function DisplayScore {
     }
 
     if ($null -ne $config.Payout) { 
-        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Held, Paid, Codes, Comment | Out-String -Width 200
+        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Disposed, Held, Paid, Codes, Comment | Out-String -Width 200
     }
     else {
         $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, UptimeF, Comment | Out-String -Width 200
@@ -2117,12 +2129,12 @@ function DisplaySat {
                 $np= $_
                 $npp = $np.Group | AggPayments
                 $p = @{
-                    'Count'                = $np.Count
-                    'Node'              = $np.Name
-                    'Held'             = $npp.held
+                    'Count'            = $np.Count
+                    'Node'             = $np.Name
+                    'Disposed'         = $npp.disposed
+                    'Held'             = $npp.held - $npp.disposed
                     'Paid'             = $npp.paid
-                    'Earned'    = $npp.held + $npp.paid
-
+                    'Earned'           = $npp.held - $npp.disposed + $npp.paid
                 }
                 $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
             }
@@ -2131,16 +2143,18 @@ function DisplaySat {
 
             
             $p = @{
-                'Count' = $sum.Count
-                'Node'  = "All nodes"
-                'Held'  = $sum.held
-                'Paid'  = $sum.paid
-                'Earned'= $sum.held + $sum.paid
+                'Count'     = $sum.Count
+                'Node'      = "All nodes"
+                'Disposed'  = $sum.disposed
+                'Held'      = $sum.held - $sum.disposed
+                'Paid'      = $sum.paid
+                'Earned'    = $sum.held - $sum.disposed + $sum.paid
             }
             $tab.Add((New-Object -TypeName PSCustomObject –Prop $p))
             
             $tab | Format-Table -AutoSize `
                 @{n="Node"; e={$_.Node}}, `
+                @{n="Disposed"; e={HumanBaks($_.Disposed)}}, `
                 @{n="Held"; e={HumanBaks($_.Held)}}, `
                 @{n="Paid"; e={HumanBaks($_.Paid)}}, `
                 @{n="Earned"; e={("{0}{1}" -f ((GetPips -width 20 -max $maxEarned -current $_.Earned -condition ($_.Node -ne "All nodes")), (HumanBaks($_.Earned))))}} `
@@ -2547,6 +2561,11 @@ function GetQuery {
     $index = $cmdlineArgs.IndexOf("-node")
     if ($index -ge 0) { $node = $cmdlineArgs[$index + 1] }
 
+    $sat = $null
+    $index = $cmdlineArgs.IndexOf("-sat")
+    if ($index -ge 0) { $sat = $cmdlineArgs[$index + 1] }
+
+
     if ($cmdlineArgs.IndexOf("-np") -ge 0) { $parallel = $false }
     else { $parallel = $true }
 
@@ -2555,6 +2574,7 @@ function GetQuery {
         Egress = $cmdlineArgs.Contains("egress")
         Days = $days
         Node = $node
+        Sat = $sat
         StartData = [System.DateTimeOffset]::Now
         EndData = $null
         Parallel = $parallel
@@ -2633,7 +2653,7 @@ if ($args.Contains("example")) {
 ##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
-#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-p", "all"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all", "-sat", "benten"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "monitor"
 
 $config = LoadConfig -cmdlineArgs $args
