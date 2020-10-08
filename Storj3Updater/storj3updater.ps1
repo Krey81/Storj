@@ -4,7 +4,7 @@
 # 2. From docker storagenode docker images on hub.docker.com
 # https://github.com/Krey81/Storj
 
-$v = "0.1.3"
+$v = "0.1.4"
 
 # Changes:
 # v0.1      - 20200304 Initial version. Download only (no update and service start\stop).
@@ -17,6 +17,10 @@ $v = "0.1.3"
 #           - other bug fixes
 #           - add some constants and descriptions
 # v0.1.3    - 20200318 Fix caching docker image
+# v0.1.4    - 20201009 
+#           - Fix permission denied on linux
+#           - Add cursor check
+#           - systemd_integration default to true
 
 # INPUT PARAMS ------------------------------------------------------
 $constants = @{
@@ -38,7 +42,10 @@ $constants = @{
     image = "storjlabs/storagenode";
 
     #image tag on docker hub
-    tag="beta";
+    tag="latest";
+
+    #update when cursor equals this symbol, or immediatelly when wait_cursor empty
+    wait_cursor="f";
 
     #dir for temp files. Script will try to autodetect it
     temp_path="";
@@ -56,7 +63,7 @@ $constants = @{
     binary_name="storagenode"
 
     #if true script will stoping systemd services before update and start it after update
-    systemd_integration = $false
+    systemd_integration = $true
     #system service name search pattern. I named my services like storj-node02
     service_pattern = "storj-node??.service";
 
@@ -289,7 +296,10 @@ function UpdateBin
 function GetCloudVersion
 {
     $v = Invoke-WebRequest $versionUriTemplate | ConvertFrom-Json
-    return $v.processes.storagenode.suggested
+    $vobj = $v.processes.storagenode.suggested
+    $cursor = $v.processes.storagenode.rollout.cursor
+    $vobj | Add-Member -NotePropertyName "cursor" -NotePropertyValue $cursor
+    return $vobj
 }
 
 #return target platform file name with extension
@@ -361,6 +371,10 @@ function NativeUpdate
 
         $sourceName = GetBinFileName -constants $constants
         $sourceBin = [System.IO.Path]::Combine($temp.temp_storj_fs, $sourceName)
+
+        if ($constants.os -eq "linux") { 
+            ExternalCommand -file "chmod" -arguments ("+x", $sourceBin)
+        }
 
         if ($null -eq $targetBin) { $targetBin = [System.IO.Path]::Combine($constants.target, $sourceName) }
         return UpdateBin -sourceBin $sourceBin -target $targetBin
@@ -511,6 +525,17 @@ function Update
     {
         Write-Host -ForegroundColor Green "Versions are equal. Exiting."
         return
+    }
+
+    if ($null -ne $cloudVersion.cursor) {
+        Write-Host ("cursor: {0}" -f $cloudVersion.cursor)
+        if (-not [String]::IsNullOrEmpty($constants.wait_cursor)) {
+            $target_cursor = "".PadRight($cloudVersion.cursor.Length, $constants.wait_cursor);
+            if ($target_cursor -ne $cloudVersion.cursor) {
+                Write-Host -ForegroundColor Green "Cursor not completed. Exiting."
+                return
+            }
+        }
     }
 
     $tempBin = GetBinFile -constants $constants -suffix "_temp"
