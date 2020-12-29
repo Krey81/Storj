@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "0.9.16"
+$v = "1.0.1"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -212,11 +212,14 @@ $v = "0.9.16"
 # v0.9.16   - 20200909
 #               -   add disposed sum in satellite details, so held in sat data must show current unpaid held
 #               -   add cmdline option -sat to filter output, example "-sat benten"
-
-# TODO v0.9.9
-#               -   add held amount rate
-#               -   fix () without wellknown nodes
-#               -   add current earnings
+# v1.0.0    - 20201205  (v1.0.x probably latest version in powershell in terms of new functions, next i move to C#), community test version (not public)
+#               -   fix "Storj API data for egress summary and egress by days differs" warning, its calculation now include repair and audit 
+#               -   node summary egress and ingress now include Repair&Audit, add egress repair (ERA) and ingress repair (IRA) columns
+#               -   shortest suffixes (G mean GiB)
+#               -   add Online status monitoring
+# v1.0.1    - 20201229
+#               -   temporary remove short T, prefer TiB (ну не нравится, и пока нет необходтимости)
+#               -   fixes for old powershell
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -552,6 +555,10 @@ function LoadConfig{
         $config | Add-Member -NotePropertyName UptimeThreshold -NotePropertyValue 3
     }
 
+    if ($null -eq $config.OnlineThreshold) { 
+        $config | Add-Member -NotePropertyName OnlineThreshold -NotePropertyValue 3
+    }
+
     if ($null -eq $config.TimeoutSec) { 
         $config | Add-Member -NotePropertyName TimeoutSec -NotePropertyValue 20
     }
@@ -769,6 +776,7 @@ function QueryNode
         $dash | Add-Member -NotePropertyName Sat -NotePropertyValue ([System.Collections.Generic.List[PSCustomObject]]@())
         $dash | Add-Member -NotePropertyName BwSummary -NotePropertyValue $null
         $dash | Add-Member -NotePropertyName Audit -NotePropertyValue $null
+        $dash | Add-Member -NotePropertyName Online -NotePropertyValue $null
         $dash | Add-Member -NotePropertyName Uptime -NotePropertyValue $null
         $dash | Add-Member -NotePropertyName LastPingWarningValue -NotePropertyValue 0
         $dash | Add-Member -NotePropertyName LastVersion -NotePropertyValue $null
@@ -861,7 +869,8 @@ function QueryNode
                 $paym | Add-Member -NotePropertyName NodeId -NotePropertyValue $dash.nodeID
                 $paym | Add-Member -NotePropertyName Node -NotePropertyValue $name
                 $dash.Payments = $paym
-                $dash.Held = ($paym | Measure-Object -Sum {$_.held - $_.disposed}).Sum
+                #$dash.Held = ($paym | Measure-Object -Sum {$_.held - $_.disposed)).Sum
+                $dash.Held = ($paym | Foreach-Object {$_.held - $_.disposed} | Measure-Object -Sum).Sum
                 $dash.Paid = ($paym | Measure-Object -Sum paid).Sum
             }
             else { 
@@ -1097,9 +1106,13 @@ function AggBandwidth2
          )    
     begin {
         $ingress = 0
+        $ingressRA = 0
         $ingressMax = 0
+        $ingressRAMax = 0
         $egress = 0
+        $egressRA = 0
         $egressMax = 0
+        $egressRAMax = 0
         $delete = 0
         $deleteMax = 0
         $repairEgress = 0
@@ -1110,17 +1123,21 @@ function AggBandwidth2
     }
     process {
         $ingress+=$item.Ingress
+        $repairIngress+=$item.RepairIngress
+        $ingressRA += $item.Ingress + $item.RepairIngress
         if ($item.Ingress -gt $ingressMax) { $ingressMax = $item.Ingress }
+        if (($item.Ingress + $item.RepairIngress) -gt $ingressRAMax) { $ingressRAMax = ($item.Ingress + $item.RepairIngress) }
         
         $egress+= $item.Egress
+        $repairEgress+=$item.RepairEgress
+        $auditEgress+=$item.AuditEgress
+        $egressRA+= $item.Egress + $item.RepairEgress + $item.AuditEgress
         if ($item.Egress -gt $egressMax) { $egressMax = $item.Egress }
+        if (($item.Egress + $item.RepairEgress + $item.AuditEgress) -gt $egressRAMax) { $egressRAMax = ($item.Egress + $item.RepairEgress + $item.AuditEgress)}
 
         $delete+= $item.Delete
         if ($item.Delete -gt $deleteMax) { $deleteMax = $item.Delete }
 
-        $repairEgress+=$item.RepairEgress
-        $repairIngress+=$item.RepairIngress
-        $auditEgress+=$item.AuditEgress
 
         if ($null -eq $from) { $from = $item.From}
         elseif ($item.From -lt $from) { $from = $item.From}
@@ -1131,9 +1148,13 @@ function AggBandwidth2
     end {
         $p = @{
             'Ingress'       = $ingress
+            'IngressRA'     = $ingressRA
             'IngressMax'    = $ingressMax
+            'IngressRAMax'  = $ingressRAMax
             'Egress'        = $egress
+            'EgressRA'      = $egressRA
             'EgressMax'     = $egressMax
+            'EgressRAMax'   = $egressRAMax
             'Delete'        = $delete
             'DeleteMax'     = $deleteMax
             'RepairEgress'  = $repairEgress
@@ -1183,6 +1204,7 @@ function GetScore
                 SatelliteName = $sat.Name
                 Audit = $sat.audit.score
                 Uptime = ($sat.uptime.totalCount - $sat.uptime.successCount)
+                Online = $sat.onlineScore
                 Bandwidth = ($sat.bandwidthDaily | AggBandwidth)
                 CommentMonitored = [String]::Join("; ", $commentMonitored)
                 Joined = $sat.nodeJoinedAt
@@ -1204,6 +1226,7 @@ function GetScore
         #$node.BwSummary = GetNodeSummary -bandwidth
         $node.BwSummary = $bw
         $node.Audit = ($_.Group | Select-Object -ExpandProperty Audit | Measure-Object -Min).Minimum
+        $node.Online = ($_.Group | Select-Object -ExpandProperty Online | Measure-Object -Min).Minimum
         $node.Uptime = ($_.Group | Select-Object -ExpandProperty Uptime | Measure-Object -Sum).Sum
     }
 
@@ -1217,8 +1240,18 @@ function Round
 }
 
 function HumanBytes {
-    param ([int64]$bytes, [switch]$dec)
-    $suff = "bytes", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "IiB"
+    param ([int64]$bytes, [switch]$dec, [switch]$short)
+    $short = $false
+
+    if ($short) {
+        $suff = "b", "K", "M", "G", "T", "P", "E", "Z", "I"
+        $ds = ""
+    }
+    else {
+        $suff = "bytes", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "IiB"    
+        $ds = " "
+    }
+    
     $level = 0
     if ($dec) {
         $base = 1000
@@ -1231,8 +1264,13 @@ function HumanBytes {
         $rest = $rest/$base
     }
     if ($rest -lt 0.001) { return "0" }
-    $mant = [Math]::Max(3 - [Math]::Floor($rest).ToString().Length,0)
-    return ("{0} {1}" -f [Math]::Round($rest,$mant), $suff[$level])
+
+    if ($short){
+        $mant = [Math]::Max(3 - [Math]::Floor($rest).ToString().Length,0)
+    }
+    else {$mant = 2}
+    
+    return ("{0}{1}{2}" -f [Math]::Round($rest,$mant), $ds, $suff[$level])
 }
 function HumanTime {
     param ([TimeSpan]$time)
@@ -1372,6 +1410,12 @@ function CheckScore{
                 $oldScore[$idx].Audit = $new.Audit
             }
             elseif ($new.Audit -gt $old.Audit) { $oldScore[$idx].Audit = $new.Audit }
+
+            if ($old.Online -ge ($new.Online + $config.OnlineThreshold)) {
+                Write-Output ("Node {0} down online from {1} to {2} on {3}" -f $new.NodeName, $old.Online, $new.Online, $new.SatelliteId) | Tee-Object -Append -FilePath $body
+                $oldScore[$idx].Online = $new.Online
+            }
+            elseif ($new.Online -gt $old.Online) { $oldScore[$idx].Online = $new.Online }
 
             if (($old.Uptime + $config.UptimeThreshold) -lt $new.Uptime) {
                 Write-Output ("Node {0} fail uptime checks. Old value {1}, new {2} on {3}" -f $new.NodeName, $old.Uptime, $new.Uptime, $new.SatelliteId) | Tee-Object -Append -FilePath $body
@@ -1649,11 +1693,15 @@ function DisplayNodes {
                 "Runtime"   = ([int](([DateTimeOffset]::Now - [DateTimeOffset]$_.startedAt).TotalHours))
                 "Ping"      = ([DateTimeOffset]::Now - $_.lastPinged)
                 "Audit"     = Round($_.Audit)
-                "Uptime"   = $_.Uptime
+                "Online"    = Round($_.Online)
+                "Uptime"    = $_.Uptime
                 "Used"      = $_.diskSpace.used
                 "Available" = $_.diskSpace.available
                 "Egress"    = $_.BwSummary.Egress
                 "Ingress"   = $_.BwSummary.Ingress
+                "EgressRA"  = $_.BwSummary.Egress + $_.BwSummary.RepairEgress + $_.BwSummary.AuditEgress
+                "IngressRA" = $_.BwSummary.Ingress + $_.BwSummary.RepairIngress
+                "Delete"    = $_.BwSummary.Delete
                 "Held"      = $_.Held
                 "Paid"      = $_.Paid
             }
@@ -1666,12 +1714,17 @@ function DisplayNodes {
             @{n="Runtime"; e={$_.Runtime}}, `
             @{n="Ping"; e={HumanTime($_.Ping)}}, `
             @{n="Audit"; e={$_.Audit}}, `
+            @{n="Online"; e={$_.Online}}, `
             @{n="UptimeF"; e={$_.Uptime}}, `
             @{n="[ Used  "; e={HumanBytes($_.Used)}}, `
             @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.Available -current $_.Used)))}}, `
             @{n="Free ]"; e={HumanBytes(($_.Available - $_.Used))}}, `
-            @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Egress)), (HumanBytes($_.Egress)))}}, `
-            @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}}, `
+            #@{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Egress)), (HumanBytes($_.Egress)))}}, `
+            @{n="EgressRA"; e={("{0}{1}" -f ((GetPips -width 10 -max $bwsummary.EgressRA -maxg $bwsummary.EgressRAMax -current $_.EgressRA)), (HumanBytes -bytes $_.EgressRA -short))}}, `
+            @{n="eRA"; e={(HumanBytes -bytes ($_.EgressRA - $_.Egress) -short)}}, `
+            #@{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}}, `
+            @{n="IngressRA"; e={("{0}{1}" -f ((GetPips -width 10 -max $bwsummary.IngressRA -maxg $bwsummary.IngressRAMax -current $_.IngressRA)), (HumanBytes -bytes $_.IngressRA -short))}}, `
+            @{n="iRA"; e={(HumanBytes -bytes ($_.IngressRA - $_.Ingress) -short)}}, `
             @{n="($) Held"; e={HumanBaks(($_.Held))}}, `
             @{n="Paid"; e={HumanBaks(($_.Paid))}}, `
             @{n="Earned                "; e={("{0} {1}" -f ((GetPips -width 20 -max ($bwsummary.MaxNodeEarned) -current ($_.Held + $_.Paid)), (HumanBaks(($_.Held + $_.Paid)))))}} `
@@ -1683,13 +1736,18 @@ function DisplayNodes {
             @{n="Runtime"; e={$_.Runtime}}, `
             @{n="Ping"; e={HumanTime($_.Ping)}}, `
             @{n="Audit"; e={$_.Audit}}, `
+            @{n="Online"; e={$_.Online}}, `
             @{n="UptimeF"; e={$_.Uptime}}, `
-            @{n="[ Used  "; e={HumanBytes($_.Used)}}, `
+            @{n="[ Used  "; e={(HumanBytes -bytes $_.Used -short)}}, `
             @{n="Disk                  "; e={("{0}" -f ((GetPips -width 20 -max $_.Available -current $_.Used)))}}, `
-            @{n="Free ]"; e={HumanBytes(($_.Available - $_.Used))}}, `
-            @{n="Egress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Egress -maxg $bwsummary.EgressMax -current $_.Egress)), (HumanBytes($_.Egress)))}}, `
-            @{n="Ingress"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Ingress -maxg $bwsummary.IngressMax -current $_.Ingress)), (HumanBytes($_.Ingress)))}} `
+            @{n="Free ]"; e={(HumanBytes -bytes ($_.Available - $_.Used) -short)}}, `
+            @{n="EgressRA"; e={("{0}{1}" -f ((GetPips -width 15 -max $bwsummary.EgressRA -maxg $bwsummary.EgressRAMax -current $_.EgressRA)), (HumanBytes -bytes $_.EgressRA -short))}}, `
+            @{n="eRA"; e={(HumanBytes -bytes ($_.EgressRA - $_.Egress) -short)}}, `
+            @{n="IngressRA"; e={("{0}{1}" -f ((GetPips -width 15 -max $bwsummary.IngressRA -maxg $bwsummary.IngressRAMax -current $_.IngressRA)), (HumanBytes -bytes $_.IngressRA -short))}}, `
+            @{n="iRA"; e={(HumanBytes -bytes ($_.IngressRA - $_.Ingress) -short)}} `
             | Out-String -Width 200
+            #@{n="Delete"; e={("{0} ({1})" -f ((GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Delete)), (HumanBytes($_.Delete)))}} `
+            
         }
     }
 
@@ -1841,6 +1899,8 @@ function DisplayFooter {
 function DisplayScore {
     param ($score, $bwsummary)
     Write-Host
+
+    #SATELLITES DETAILS
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S    D E T A I L S"
 
     $tab = [System.Collections.Generic.List[PSCustomObject]]@()
@@ -1858,6 +1918,7 @@ function DisplayScore {
             #'Delete'    = ("{0} {1}" -f (GetPips -width 10 -max $bwsummary.Delete -maxg $bwsummary.DeleteMax -current $_.Bandwidth.Delete), (HumanBytes($_.Bandwidth.Delete)))
             'Audit'     = Round($_.Audit)
             'UptimeF'   = $_.Uptime
+            'Online'    = Round($_.Online)
             'Joined'    = ("{0:yyyy-MM-dd} ({1,2})" -f $_.Joined, $_.Age)
             'Disposed'  = HumanBaks($_.Disposed)
             'Held'      = HumanBaks($_.Held)
@@ -1869,10 +1930,10 @@ function DisplayScore {
     }
 
     if ($null -ne $config.Payout) { 
-        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, UptimeF, Disposed, Held, Paid, Codes, Comment | Out-String -Width 200
+        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Joined, Ingress, Egress, Audit, Online, UptimeF, Disposed, Held, Paid, Codes, Comment | Out-String -Width 200
     }
     else {
-        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, UptimeF, Comment | Out-String -Width 200
+        $tab.GetEnumerator() | Format-Table -AutoSize Satellite, Node, Ingress, Egress, Audit, Online, UptimeF, Comment | Out-String -Width 200
     }
     Write-Host
 }
@@ -2095,6 +2156,7 @@ function GraphDailyTimeline
 function DisplaySat {
     param ($nodes, $bw, $query, $config)
     Write-Host
+    #SATELLITES BANDWIDTH
     Write-Host -ForegroundColor Yellow -BackgroundColor Black "S A T E L L I T E S   B A N D W I D T H"
     Write-Host "Legenda:"
     Write-Host "`ti `t-ingress"
@@ -2102,6 +2164,7 @@ function DisplaySat {
     Write-Host "`t= `t-pips from all bandwidth"
     Write-Host "`t- `t-pips from bandwidth of maximum node, or simple percent line"
     Write-Host "`t* n `t-down line supressed n times"
+    Write-Host "`tall suffixes (M, G, T, P) mean binary (MiB, GiB, TiB, PiB)"
     Write-Host
     $now = [System.DateTimeOffset]::UtcNow
     ($nodes | Select-Object -ExpandProperty Sat) | Group-Object id | ForEach-Object {
@@ -2609,7 +2672,7 @@ function GetDailyPaymentTimeline {
 
     $summarySum = ($sat | Select-Object -ExpandProperty egressSummary | Measure-Object -Sum).Sum # / 1000000000000
     #$byDaySum = ($bw | Measure-Object -Sum {$_.egress.usage}).Sum #/ 1000000000000
-    $byDaySum = ($bw | Select-Object -ExpandProperty egress | Select-Object -ExpandProperty usage | Measure-Object -Sum).Sum
+    $byDaySum = ($bw | Select-Object -ExpandProperty egress | ForEach-Object {$_.usage + $_.repair + $_.audit} | Measure-Object -Sum).Sum
     $delta = $summarySum - $byDaySum
     $deltaBaks = $delta / 1000000000000 * 20.0
 
@@ -2651,10 +2714,10 @@ if ($args.Contains("example")) {
 
 #DEBUG
 ##$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-node", "node01", "-p", "all"
-#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
 #$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all", "-sat", "benten"
-#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "monitor"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf"
+#$args = "-c", ".\ConfigSamples\Storj3Monitor.Debug.conf", "-np", "-p", "all"
 
 $config = LoadConfig -cmdlineArgs $args
 
@@ -2711,5 +2774,5 @@ elseif ($nodes.Count -gt 0) {
 #DEBUG
 #cd C:\Projects\Repos\Storj
 #.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Storj3Monitor.Debug.conf -np
-#.\Storj3Monitor\Storj3Monitor.ps1 -c .\Storj3Monitor\ConfigSamples\Alex.conf -np
+
 
