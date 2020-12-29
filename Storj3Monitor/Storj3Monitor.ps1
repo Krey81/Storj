@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "1.0.1"
+$v = "1.0.2"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -220,6 +220,8 @@ $v = "1.0.1"
 # v1.0.1    - 20201229
 #               -   temporary remove short T, prefer TiB (ну не нравится, и пока нет необходтимости)
 #               -   fixes for old powershell
+# v1.0.2    - 20201229
+#               -   Canopy letter noved to 23:50
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -1591,7 +1593,12 @@ function Monitor {
 
         # Canopy warning
         #DEBUG check hour, must be 10
-        if (($null -eq $config.Canary) -or ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day -and [System.DateTimeOffset]::Now.Hour -ge 10)) {
+        if (
+            ($null -eq $config.Canary) `
+            -or ([System.DateTimeOffset]::Now.Day -ne $config.Canary.Day `
+            -and [System.DateTimeOffset]::Now.Hour -ge 23 `
+            -and [System.DateTimeOffset]::Now.Minute -ge 50)) {
+
             $config.Canary = [System.DateTimeOffset]::Now
             Write-Output ("storj3monitor is alive {0}" -f $config.Canary) | Tee-Object -Append -FilePath $body
             #$bwsummary_old = ($newNodes | Select-Object -ExpandProperty BwSummary | AggBandwidth2)
