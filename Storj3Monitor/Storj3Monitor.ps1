@@ -3,7 +3,7 @@
 # if uptime or audit down by [threshold] script send email to you
 # https://github.com/Krey81/Storj
 
-$v = "1.0.3"
+$v = "1.0.4"
 
 # Changes:
 # v0.0    - 20190828 Initial version, only displays data
@@ -225,6 +225,8 @@ $v = "1.0.3"
 # v1.0.3    - 20201229
 #               -   Canopy letter check time in UTC
 #               -   Canopy fix first day letter
+# v1.0.4    - 20210107
+#               -   Add us2 satellite
 
 #TODO-Drink-and-cheers
 #               -   Early bird (1-bottle first), greatings for all versions of this script
@@ -691,6 +693,7 @@ function GetSatName{
         "12L9ZFwhzVpuEKMUNUqkaTLGzwY9G24tbiigLiXpmZWKwmcNDDs" = "europe-west-1";
         "1wFTAgs9DP5RSnCqKV1eLf6N9wtk4EAtmN5DpSxcs8EjT69tGE"  = "saltlake";
         "12rfG3sh9NCWiX3ivPjq2HtdLmbqCrvHVEzJubnzFzosMuawymB" = "europe-north-1"
+        "12tRQrMTWUWwzwGh18i7Fqs67kmdhH9t6aToeiwbo5mfS2rUmo" = "us2"
     }
     
     $name = $wellKnownSat[$id] 
