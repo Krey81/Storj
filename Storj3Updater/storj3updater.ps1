@@ -4,7 +4,7 @@
 # 2. From docker storagenode docker images on hub.docker.com
 # https://github.com/Krey81/Storj
 
-$v = "0.1.4"
+$v = "0.1.5"
 
 # Changes:
 # v0.1      - 20200304 Initial version. Download only (no update and service start\stop).
@@ -21,6 +21,8 @@ $v = "0.1.4"
 #           - Fix permission denied on linux
 #           - Add cursor check
 #           - systemd_integration default to true
+# v0.1.5    - 20210204  
+#           - add forse (-f) flag to ignore cursor
 
 # INPUT PARAMS ------------------------------------------------------
 $constants = @{
@@ -137,6 +139,9 @@ function GetConstants {
     if ($idx -gt 0 -and $cmdlineArgs.Length -ge ($idx + 1)) {
         $constants.method = $cmdlineArgs[$idx + 1]
     }
+
+    $idx = $cmdlineArgs.IndexOf("-f")
+    if ($idx -gt 0) { $constants.forse = $true }
 
     return $constants
 }
@@ -529,7 +534,7 @@ function Update
 
     if ($null -ne $cloudVersion.cursor) {
         Write-Host ("cursor: {0}" -f $cloudVersion.cursor)
-        if (-not [String]::IsNullOrEmpty($constants.wait_cursor)) {
+        if (-not [String]::IsNullOrEmpty($constants.wait_cursor) -and (-not $constants.forse)) {
             $target_cursor = "".PadRight($cloudVersion.cursor.Length, $constants.wait_cursor);
             if ($target_cursor -ne $cloudVersion.cursor) {
                 Write-Host -ForegroundColor Green "Cursor not completed. Exiting."
